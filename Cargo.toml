@@ -1,0 +1,22 @@
+[package]
+name = "repostacks"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Your GitHub library for Windows — catalogue repos on shelves, watch releases with Atom feeds, and queue downloads with the right asset every time."
+repository = "https://github.com/SeanShaffer88/RepoStacks"
+
+[lib]
+name = "repostacks_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "repostacks"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
