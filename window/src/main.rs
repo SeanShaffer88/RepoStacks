@@ -20,6 +20,7 @@ use repostacks_core::net::{
 };
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
+use repostacks_core::usage::{UsageKind, UsageLedger};
 use repostacks_core::user_import::{
     apply_user_import, fetch_org_repos, fetch_user_repos, Archived, Forks, Ownership,
     UserRepoFilter, Visibility,
@@ -35,6 +36,7 @@ struct Inner {
     catalog: Catalog,
     settings: Settings,
     queue: Queue,
+    usage: UsageLedger,
     activity: Vec<String>,
     last_atom_run: u64,
     last_metadata_run: u64,
@@ -64,6 +66,9 @@ impl AppState {
     fn queue_path(&self) -> PathBuf {
         env_or("REPOSTACKS_QUEUE", self.data_dir.join("queue.json"))
     }
+    fn usage_path(&self) -> PathBuf {
+        env_or("REPOSTACKS_USAGE", self.data_dir.join("usage.json"))
+    }
     fn downloads_root(&self, settings: &Settings) -> PathBuf {
         let dir = PathBuf::from(&settings.download_dir);
         if dir.is_absolute() {
@@ -89,6 +94,28 @@ impl AppState {
             .queue
             .save(&self.queue_path())
             .map_err(|e| format!("save queue: {e}"))
+    }
+    fn save_usage(&self, inner: &Inner) -> Result<(), String> {
+        inner
+            .usage
+            .save(&self.usage_path())
+            .map_err(|e| format!("save usage ledger: {e}"))
+    }
+    /// Record counted REST calls in the standing local meter. Saving
+    /// is best-effort here because the network call already happened;
+    /// a failed save is said in the activity log instead of failing
+    /// the operation the user asked for.
+    fn record_usage(&self, inner: &mut Inner, kind: UsageKind, calls: u32) {
+        if calls == 0 {
+            return;
+        }
+        inner.usage.record(kind, calls, now_unix());
+        if let Err(e) = self.save_usage(inner) {
+            log(
+                inner,
+                format!("API usage meter could not be saved ({e}); its counts may be incomplete."),
+            );
+        }
     }
     fn token(&self, inner: &Inner) -> Option<String> {
         if let Ok(t) = std::env::var("REPOSTACKS_TOKEN") {
@@ -201,6 +228,28 @@ struct OverviewDto {
     queued_jobs: usize,
     has_token: bool,
     download_dir: String,
+}
+
+#[derive(Serialize)]
+struct UsageKindDto {
+    name: String,
+    label: String,
+    hour: u32,
+    day: u32,
+    lifetime: u64,
+}
+
+#[derive(Serialize)]
+struct UsageDto {
+    mode: String,
+    hourly_limit: u32,
+    hour_spent: u32,
+    hour_percent: f64,
+    hour_reset_unix: u64,
+    day_spent: u32,
+    lifetime_spent: u64,
+    last_spent_unix: u64,
+    kinds: Vec<UsageKindDto>,
 }
 
 #[derive(Serialize)]
@@ -577,6 +626,10 @@ fn import_user(
     } else {
         fetch_user_repos(&fetcher, &input.username, token.as_deref())?
     };
+    {
+        let mut inner = state.inner.lock().unwrap();
+        state.record_usage(&mut inner, UsageKind::Imports, spent);
+    }
     let mut inner = state.inner.lock().unwrap();
     let report = apply_user_import(
         &mut inner.catalog,
@@ -752,6 +805,7 @@ fn check_impl(state: &AppState, only: Option<&[RepoRef]>) -> Result<Vec<CheckDto
         .filter_map(|r| r.outcome.as_ref().ok())
         .map(|o| o.quota_spent)
         .sum();
+    state.record_usage(&mut inner, UsageKind::CheckFallback, fallback_spent);
     let quota_note = if fallback_spent == 0 {
         "0 API calls".to_string()
     } else {
@@ -822,6 +876,7 @@ fn refresh_all(state: State<'_, AppState>, force: bool) -> Result<serde_json::Va
         }
     }
     let mut inner = state.inner.lock().unwrap();
+    state.record_usage(&mut inner, UsageKind::Metadata, spent);
     for entry in &refreshed {
         if let Some(stored) = inner.catalog.get_mut(&entry.repo) {
             apply_refreshed(stored, entry);
@@ -871,6 +926,10 @@ fn release_assets(
     drop(inner);
     let fetcher = CurlFetcher::default();
     let (assets, spent) = fetch_release_assets(&fetcher, &repo_ref, &tag, token.as_deref())?;
+    {
+        let mut inner = state.inner.lock().unwrap();
+        state.record_usage(&mut inner, UsageKind::Assets, spent);
+    }
     let (pick, reason) = plan_download(&entry, &tag, &assets, std::path::Path::new("."))
         .map(|p| (p.asset_name, p.reason))
         .unwrap_or_default();
@@ -969,7 +1028,11 @@ fn download_worker_run(app: &AppHandle) {
                 continue;
             }
             match fetch_release_assets(&fetcher, repo, &tag, token.as_deref()) {
-                Ok((assets, _spent)) => {
+                Ok((assets, spent)) => {
+                    {
+                        let mut inner = state.inner.lock().unwrap();
+                        state.record_usage(&mut inner, UsageKind::Assets, spent);
+                    }
                     match enqueue_download(&mut work_queue, &entry, &tag, &assets, &root) {
                         Ok(id) => notes.push(format!("Queued #{id}: {repo} {tag}")),
                         Err(e) => notes.push(format!("{repo}: {e}")),
@@ -1376,6 +1439,39 @@ fn get_activity(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     Ok(inner.activity.clone())
 }
 
+#[tauri::command]
+fn get_usage(state: State<'_, AppState>) -> Result<UsageDto, String> {
+    let inner = state.inner.lock().unwrap();
+    let token = state.token(&inner);
+    let snap = inner
+        .usage
+        .snapshot(auth_for_token(token.as_deref()), now_unix());
+    Ok(UsageDto {
+        mode: if token.is_some() {
+            "token".into()
+        } else {
+            "anonymous".into()
+        },
+        hourly_limit: snap.hourly_limit,
+        hour_spent: snap.hour_spent,
+        hour_percent: snap.hour_percent(),
+        hour_reset_unix: snap.hour_reset_unix,
+        day_spent: snap.day_spent,
+        lifetime_spent: snap.lifetime_spent,
+        last_spent_unix: snap.last_spent_unix,
+        kinds: UsageKind::all()
+            .into_iter()
+            .map(|kind| UsageKindDto {
+                name: kind.name().into(),
+                label: kind.label().into(),
+                hour: snap.hour_by_kind.get(&kind).copied().unwrap_or(0),
+                day: snap.day_by_kind.get(&kind).copied().unwrap_or(0),
+                lifetime: snap.lifetime_by_kind.get(&kind).copied().unwrap_or(0),
+            })
+            .collect(),
+    })
+}
+
 // ---------- The Librarian ----------
 
 /// One Librarian pass: Atom checks for everything (free, in parallel),
@@ -1409,6 +1505,15 @@ fn librarian_pass(state: &AppState, app: &AppHandle) -> Vec<String> {
     let mut to_download: Vec<(RepoRef, String)> = Vec::new();
     {
         let mut inner = state.inner.lock().unwrap();
+        state.record_usage(
+            &mut inner,
+            UsageKind::CheckFallback,
+            results
+                .iter()
+                .filter_map(|r| r.outcome.as_ref().ok())
+                .map(|o| o.quota_spent)
+                .sum(),
+        );
         for r in &results {
             if let Some(entry) = inner.catalog.get_mut(&r.repo) {
                 entry.latest_tag = r.entry.latest_tag.clone();
@@ -1436,8 +1541,9 @@ fn librarian_pass(state: &AppState, app: &AppHandle) -> Vec<String> {
     // then enqueue under the lock.
     for (repo, tag) in to_download {
         match fetch_release_assets(&fetcher, &repo, &tag, token.as_deref()) {
-            Ok((assets, _)) => {
+            Ok((assets, spent)) => {
                 let mut inner = state.inner.lock().unwrap();
+                state.record_usage(&mut inner, UsageKind::Assets, spent);
                 let entry = match inner.catalog.get(&repo) {
                     Some(e) => e.clone(),
                     None => continue,
@@ -1501,6 +1607,7 @@ fn librarian_pass(state: &AppState, app: &AppHandle) -> Vec<String> {
             }
         }
         let mut inner = state.inner.lock().unwrap();
+        state.record_usage(&mut inner, UsageKind::Metadata, spent);
         for entry in &refreshed {
             if let Some(stored) = inner.catalog.get_mut(&entry.repo) {
                 apply_refreshed(stored, entry);
@@ -1648,6 +1755,7 @@ fn main() {
             catalog: Catalog::default(),
             settings: Settings::default(),
             queue: Queue::default(),
+            usage: UsageLedger::default(),
             activity: Vec::new(),
             last_atom_run: 0,
             last_metadata_run: 0,
@@ -1683,6 +1791,13 @@ fn main() {
             Err(e) => log(
                 &mut inner,
                 format!("Queue could not be loaded ({e}) — starting empty."),
+            ),
+        }
+        match UsageLedger::load(&state.usage_path()) {
+            Ok(u) => inner.usage = u,
+            Err(e) => log(
+                &mut inner,
+                format!("API usage ledger could not be loaded ({e}) — starting a fresh meter."),
             ),
         }
         log(&mut inner, "The Stacks opened".into());
@@ -1832,6 +1947,7 @@ fn main() {
             set_token,
             clear_token,
             get_activity,
+            get_usage,
             librarian_now,
         ])
         .run(tauri::generate_context!())
