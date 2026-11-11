@@ -1,7 +1,9 @@
 ; RepoStacks per-user installer.
 ; Built by the release workflow:
 ;   makensis /DVERSION=0.1.0 /DSTAGE=<staging dir> /DOUTDIR=<output dir> scripts\installer.nsi
-; The staging dir holds RepoStacks.exe (the window) and repostacks.exe (the CLI).
+; The staging dir holds RepoStacks.exe (the window) and repostacks-cli.exe
+; (the CLI — the -cli suffix matters: on Windows the two names would
+; otherwise differ only by letter case and collide in one folder).
 Unicode true
 SetCompressor /SOLID lzma
 
@@ -30,7 +32,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 Section "RepoStacks" SecMain
   SetOutPath "$INSTDIR"
   File "${STAGE}\RepoStacks.exe"
-  File "${STAGE}\repostacks.exe"
+  File "${STAGE}\repostacks-cli.exe"
   File "${STAGE}\LICENSE"
 
   CreateDirectory "$SMPROGRAMS\RepoStacks"
@@ -48,7 +50,7 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$INSTDIR\RepoStacks.exe"
-  Delete "$INSTDIR\repostacks.exe"
+  Delete "$INSTDIR\repostacks-cli.exe"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\Uninstall.exe"
   ; The data folder (catalogue, settings, downloads beside the exe) belongs
