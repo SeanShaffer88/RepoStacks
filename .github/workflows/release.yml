@@ -28,7 +28,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item window/target/release/repostacks-window.exe dist/RepoStacks.exe
-          Copy-Item target/release/repostacks.exe dist/repostacks.exe
+          Copy-Item target/release/repostacks.exe dist/repostacks-cli.exe
           Copy-Item LICENSE dist/LICENSE
       - name: Install NSIS
         shell: pwsh
@@ -46,7 +46,7 @@ jobs:
         shell: pwsh
         run: |
           $v = "${{ steps.ver.outputs.version }}"
-          Compress-Archive -Path dist/RepoStacks.exe, dist/repostacks.exe, dist/LICENSE -DestinationPath "dist/RepoStacks-v$v-x64-Portable.zip"
+          Compress-Archive -Path dist/RepoStacks.exe, dist/repostacks-cli.exe, dist/LICENSE -DestinationPath "dist/RepoStacks-v$v-x64-Portable.zip"
       - name: Checksums
         shell: pwsh
         run: |
