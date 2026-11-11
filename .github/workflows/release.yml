@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content window/tauri.conf.json | ConvertFrom-Json).version
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - name: Gate - core tests
+        run: cargo test --locked
+      - name: Build the CLI
+        run: cargo build --release --locked
+      - name: Build the window (production protocol)
+        run: cargo build --release --locked --features custom-protocol --manifest-path window/Cargo.toml
+      - name: Stage the release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item window/target/release/repostacks-window.exe dist/RepoStacks.exe
+          Copy-Item target/release/repostacks.exe dist/repostacks.exe
+          Copy-Item LICENSE dist/LICENSE
+      - name: Build the installer (NSIS)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) { $makensis = "makensis" }
+          & $makensis /DVERSION=$v /DSTAGE=dist /DOUTDIR=dist scripts/installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+      - name: Build the portable zip
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          Compress-Archive -Path dist/RepoStacks.exe, dist/repostacks.exe, dist/LICENSE -DestinationPath "dist/RepoStacks-v$v-x64-Portable.zip"
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $lines = foreach ($f in @("RepoStacks-v$v-x64-Setup.exe", "RepoStacks-v$v-x64-Portable.zip")) {
+            $h = (Get-FileHash "dist/$f" -Algorithm SHA256).Hash.ToLower()
+            "$h  $f"
+          }
+          $lines | Out-File -Encoding ascii dist/SHA256SUMS.txt
+      - name: Create the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          gh release create "v$v" "dist/RepoStacks-v$v-x64-Setup.exe" "dist/RepoStacks-v$v-x64-Portable.zip" "dist/SHA256SUMS.txt" --title "RepoStacks v$v" --notes "RepoStacks v$v - see docs/CHANGELOG.md for what is in this release."
