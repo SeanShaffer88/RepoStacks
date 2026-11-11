@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Test the core and CLI
         run: cargo test --locked
@@ -20,7 +20,7 @@ jobs:
   window:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Build the window (production protocol)
         run: cargo build --release --locked --features custom-protocol --manifest-path window/Cargo.toml

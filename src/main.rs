@@ -21,6 +21,7 @@ use repostacks_core::net::{
 };
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
+use repostacks_core::usage::{UsageKind, UsageLedger};
 use repostacks_core::user_import::{
     apply_user_import, fetch_org_repos, fetch_user_repos, Archived, Forks, Ownership,
     UserRepoFilter, Visibility,
@@ -54,6 +55,27 @@ fn settings_path() -> PathBuf {
     match std::env::var_os("REPOSTACKS_SETTINGS") {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from("data").join("settings.json"),
+    }
+}
+
+fn usage_path() -> PathBuf {
+    match std::env::var_os("REPOSTACKS_USAGE") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from("data").join("usage.json"),
+    }
+}
+
+/// Add counted REST calls to the persistent local usage ledger. The
+/// meter is accounting for this app's own counted calls, not a live
+/// GitHub quota reading. A ledger that cannot be loaded is left alone
+/// rather than replaced.
+fn record_usage(kind: UsageKind, calls: u32) {
+    if calls == 0 {
+        return;
+    }
+    if let Ok(mut ledger) = UsageLedger::load(&usage_path()) {
+        ledger.record(kind, calls, now_unix());
+        let _ = ledger.save(&usage_path());
     }
 }
 
@@ -234,6 +256,7 @@ fn run(args: &[String]) -> Result<(), String> {
             } else {
                 fetch_user_repos(&fetcher, username, tok.as_deref())?
             };
+            record_usage(UsageKind::Imports, spent);
             let mut cat = Catalog::load(&path)?;
             let report =
                 apply_user_import(&mut cat, &repos, &filter, username, now_unix(), dry_run);
@@ -419,6 +442,14 @@ fn run(args: &[String]) -> Result<(), String> {
                         now_unix(),
                         settings.concurrency as usize,
                         tok.as_deref(),
+                    );
+                    record_usage(
+                        UsageKind::CheckFallback,
+                        results
+                            .iter()
+                            .filter_map(|r| r.outcome.as_ref().ok())
+                            .map(|o| o.quota_spent)
+                            .sum(),
                     );
                     let mut todo: Vec<RepoRef> = Vec::new();
                     for r in &results {
@@ -722,6 +753,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let tok = token();
             match check_releases(&fetcher, entry, now_unix(), tok.as_deref()) {
                 Ok(out) => {
+                    record_usage(UsageKind::CheckFallback, out.quota_spent);
                     let repo = entry.repo.clone();
                     let installed = entry.installed_tag.clone();
                     cat.save(&path)
@@ -791,6 +823,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 .filter_map(|r| r.outcome.as_ref().ok())
                 .map(|o| o.quota_spent)
                 .sum();
+            record_usage(UsageKind::CheckFallback, fallback_spent);
             if fallback_spent == 0 {
                 println!("Release checks used no API quota (Atom feeds).");
             } else {
@@ -874,6 +907,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             cat.save(&path)
                 .map_err(|e| format!("save catalogue: {e}"))?;
+            record_usage(UsageKind::Metadata, spent);
             println!(
                 "API quota spent this run: {spent} of {} per hour.",
                 policy.auth.hourly_rest_limit()
@@ -900,6 +934,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let fetcher = CurlFetcher::default();
             let tok = token();
             let (assets, spent) = fetch_release_assets(&fetcher, &repo, &tag, tok.as_deref())?;
+            record_usage(UsageKind::Assets, spent);
             println!("{repo} {tag}: {} asset(s)", assets.len());
             for a in &assets {
                 println!(
@@ -1008,6 +1043,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let fetcher = CurlFetcher::default();
             let tok = token();
             let (assets, spent) = fetch_release_assets(&fetcher, &repo, &tag, tok.as_deref())?;
+            record_usage(UsageKind::Assets, spent);
             let entry = cat.get(&repo).expect("checked").clone();
             let mut queue = Queue::load(&queue_path())?;
             let id = enqueue_download(&mut queue, &entry, &tag, &assets, &root)?;
@@ -1051,6 +1087,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let (latest, installed) = {
                 let entry = cat.get_mut(&repo).expect("checked");
                 let out = check_releases(&fetcher, entry, now, tok.as_deref())?;
+                record_usage(UsageKind::CheckFallback, out.quota_spent);
                 (out.latest_tag, entry.installed_tag.clone())
             };
             cat.save(&path)
@@ -1086,6 +1123,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 let entry = cat.get_mut(&repo).expect("listed");
                 match check_releases(&fetcher, entry, now, tok.as_deref()) {
                     Ok(out) => {
+                        record_usage(UsageKind::CheckFallback, out.quota_spent);
                         if !out.latest_tag.is_empty() && out.latest_tag != entry.installed_tag {
                             println!("{repo}: {} available.", out.latest_tag);
                             todo.push(repo.clone());
@@ -1326,6 +1364,92 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        "usage" => {
+            // The standing API meter: calls RepoStacks itself counted,
+            // grouped by purpose. This is not a live GitHub reading —
+            // other tools using the same address or token are not in it.
+            let ledger = UsageLedger::load(&usage_path())?;
+            let tok = token();
+            let snap = ledger.snapshot(auth_for_token(tok.as_deref()), now_unix());
+            if json_mode {
+                let kinds = |hour: bool, day: bool, life: bool| {
+                    Json::Obj(
+                        UsageKind::all()
+                            .into_iter()
+                            .map(|kind| {
+                                let value = if hour {
+                                    snap.hour_by_kind.get(&kind).copied().unwrap_or(0) as f64
+                                } else if day {
+                                    snap.day_by_kind.get(&kind).copied().unwrap_or(0) as f64
+                                } else if life {
+                                    snap.lifetime_by_kind.get(&kind).copied().unwrap_or(0) as f64
+                                } else {
+                                    0.0
+                                };
+                                (kind.name().into(), Json::Num(value))
+                            })
+                            .collect(),
+                    )
+                };
+                let out = Json::Obj(vec![
+                    (
+                        "mode".into(),
+                        Json::Str(if tok.is_some() { "token" } else { "anonymous" }.into()),
+                    ),
+                    ("hourly_limit".into(), Json::Num(snap.hourly_limit as f64)),
+                    ("hour_spent".into(), Json::Num(snap.hour_spent as f64)),
+                    ("hour_percent".into(), Json::Num(snap.hour_percent())),
+                    (
+                        "hour_reset_unix".into(),
+                        Json::Num(snap.hour_reset_unix as f64),
+                    ),
+                    ("day_spent".into(), Json::Num(snap.day_spent as f64)),
+                    (
+                        "lifetime_spent".into(),
+                        Json::Num(snap.lifetime_spent as f64),
+                    ),
+                    (
+                        "last_spent_unix".into(),
+                        Json::Num(snap.last_spent_unix as f64),
+                    ),
+                    ("hour_by_kind".into(), kinds(true, false, false)),
+                    ("day_by_kind".into(), kinds(false, true, false)),
+                    ("lifetime_by_kind".into(), kinds(false, false, true)),
+                ]);
+                println!("{}", out.to_string_pretty());
+                return Ok(());
+            }
+            let reset_secs = snap.hour_reset_unix % 86_400;
+            println!("API usage counted by RepoStacks (not a live GitHub reading):");
+            println!(
+                "  This hour: {} of {} call(s) ({:.0}%), window resets {:02}:{:02} UTC.",
+                snap.hour_spent,
+                snap.hourly_limit,
+                snap.hour_percent(),
+                reset_secs / 3600,
+                (reset_secs % 3600) / 60
+            );
+            println!(
+                "  Today (UTC): {} call(s). Lifetime: {} call(s).",
+                snap.day_spent, snap.lifetime_spent
+            );
+            for kind in UsageKind::all() {
+                let lifetime = snap.lifetime_by_kind.get(&kind).copied().unwrap_or(0);
+                if lifetime > 0 {
+                    println!(
+                        "  {}: {} this hour, {} today, {} lifetime.",
+                        kind.label(),
+                        snap.hour_by_kind.get(&kind).copied().unwrap_or(0),
+                        snap.day_by_kind.get(&kind).copied().unwrap_or(0),
+                        lifetime
+                    );
+                }
+            }
+            if snap.lifetime_spent == 0 {
+                println!("  No counted REST calls yet. Atom release checks are free.");
+            }
+            Ok(())
+        }
         "doctor" => {
             // Plain-language health check: state files readable, data
             // folder writable, curl present. Exit code fails if any check
@@ -1351,6 +1475,17 @@ fn run(args: &[String]) -> Result<(), String> {
             match Settings::load(&settings_path()) {
                 Ok(_) => report(true, "settings load".into()),
                 Err(e) => report(false, format!("settings: {e}")),
+            }
+            match UsageLedger::load(&usage_path()) {
+                Ok(u) => report(
+                    true,
+                    format!(
+                        "usage ledger loads ({} lifetime counted call(s))",
+                        u.snapshot(auth_for_token(token().as_deref()), now_unix())
+                            .lifetime_spent
+                    ),
+                ),
+                Err(e) => report(false, format!("usage ledger: {e}")),
             }
             let dir = path
                 .parent()
@@ -1466,6 +1601,7 @@ fn print_help() {
          queue [list|run|pause|resume|cancel|retry|clear]  The acquisitions queue\n  \
          config [download-dir|concurrency|poll]  Librarian settings\n  \
          updates                   Installed volumes with a newer release\n  \
+         usage                     API calls RepoStacks has counted, by purpose and period\n  \
          doctor                    Health check: state files, data folder, curl\n  \
          --json                    With list/find/updates/facets/queue list: JSON output\n  \
          version                   Print the version\n"
