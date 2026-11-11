@@ -31,7 +31,11 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.8.0: one instance only (a second launch steps aside instead of
+v0.9.0: a standing API-usage meter — every REST call the app counts
+(metadata refreshes, asset lists, release-check fallbacks, imports)
+is recorded in a local ledger, shown by the CLI `usage` command and
+on the Librarian screen, split by purpose for this hour, today, and
+lifetime. Before that, v0.8.0 made it one instance only (a second launch steps aside instead of
 fighting over the library), and downloads run on a background worker
 — the window stays responsive during transfers, with genuinely live
 progress in Acquisitions. Before that, v0.7.0 made release checks
