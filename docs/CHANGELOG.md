@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.0 — 2026-11-11
+- Search grows negation and freshness: prefix any term with `-` to
+  exclude it (`-lang:c`, `-topic:games`, `-is:installed`), and find
+  volumes that are due for a check with `is:due` / `is:never`.
+- Metadata refresh is parallel (CLI and window), bounded by the
+  concurrency setting — large catalogues no longer pay one network
+  round-trip per repo in sequence. Bulk imports deduplicate against a
+  set instead of scanning, keeping big imports fast.
+- New CLI commands: `export` (the catalogue as an importable list, or
+  full JSON with `--json`) and `clean` (removes download folders of
+  repos no longer catalogued and orphaned `.part` files; dry run
+  unless `--yes`). `doctor` also reports library health: volumes never
+  checked, volumes due, failed jobs, and what a clean would reclaim.
+- Window: volume pages gain "Open on GitHub" and "Open download
+  folder"; the Librarian can run a pass when the app opens (a new
+  setting, off by default); saved searches are manageable from the
+  filter panel; the ledger's columns are choosable in the View section;
+  Acquisitions gains "Retry all failed"; check and refresh results now
+  report failures in the toast instead of only in the log.
+- Accessibility: catalogue entries open by keyboard (Enter/Space) in
+  every layout, the Add dialog traps Tab while open, Ctrl+F also
+  focuses search, and the result count is announced to screen readers.
+- Reliability & safety: state saves flush to disk before the atomic
+  rename; the Librarian's scheduler survives a failing pass and logs
+  it; asset names and release tags from the network are validated as
+  plain file names before they become paths (in the planner and again
+  in the engine, since the queue file is editable text).
+
 ## 0.3.0 — 2026-11-11
 - Import a GitHub user's projects: the Add Volumes dialog and the CLI
   (`import-user`) list everything a user has on GitHub and import it with

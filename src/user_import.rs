@@ -230,12 +230,19 @@ pub fn apply_user_import(
     now_unix: u64,
     dry_run: bool,
 ) -> ImportReport {
+    // Membership against a set built once — a linear get() per repo
+    // makes importing a large account into a large catalogue quadratic.
+    let mut present: std::collections::HashSet<String> = cat
+        .entries
+        .iter()
+        .map(|e| e.repo.full_name().to_lowercase())
+        .collect();
     let mut report = ImportReport::default();
     for r in repos {
         if !filter.accepts(r, username) {
             continue;
         }
-        if cat.get(&r.repo).is_some() {
+        if !present.insert(r.repo.full_name().to_lowercase()) {
             report.duplicates.push(r.repo.full_name());
             continue;
         }

@@ -7,13 +7,16 @@
 use repostacks_core::atom::parse_releases_atom;
 use repostacks_core::cache_policy::CachePolicy;
 use repostacks_core::catalog::{Catalog, RepoEntry};
-use repostacks_core::download::{enqueue_download, plan_download, run_pending};
+use repostacks_core::download::{
+    clean_downloads, enqueue_download, plan_download, run_pending, scan_downloads,
+};
 use repostacks_core::glob_match::select_assets;
 use repostacks_core::http::{hidden_command, CurlDownloader, CurlFetcher};
 use repostacks_core::json::Json;
 use repostacks_core::net::fetch_release_assets;
 use repostacks_core::net::{
-    auth_for_token, check_entries_parallel, check_releases, refresh_metadata, RefreshOutcome,
+    auth_for_token, check_entries_parallel, check_releases, refresh_entries_parallel,
+    RefreshOutcome,
 };
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
@@ -54,7 +57,7 @@ fn settings_path() -> PathBuf {
 
 fn run_find(catalog: &Catalog, settings: &Settings, query_text: &str) -> Result<(), String> {
     let q = Query::parse(query_text);
-    let hits = search_execute(catalog, &q);
+    let hits = search_execute(catalog, &q, now_unix());
     print!("{}", render(&hits, catalog, &settings.view));
     println!("{} volume(s).", hits.len());
     Ok(())
@@ -245,6 +248,62 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        "export" => {
+            // The catalogue in a portable form. Default: the importable
+            // list (one owner/repo per line). --json: the full catalogue
+            // JSON (the same schema as the data file). A path argument
+            // writes to that file instead of stdout.
+            let cat = Catalog::load(&path)?;
+            let as_json = json_mode; // --json is the global flag, stripped upstream
+            let dest = args.get(1).filter(|a| !a.starts_with("--"));
+            let text = if as_json {
+                cat.to_json().to_string_pretty()
+            } else {
+                cat.export_list()
+            };
+            match dest {
+                Some(file) => {
+                    std::fs::write(file, &text).map_err(|e| format!("write {file}: {e}"))?;
+                    println!("Exported {} volume(s) to {file}.", cat.entries.len());
+                }
+                None => print!("{text}"),
+            }
+            Ok(())
+        }
+        "clean" => {
+            // Download-folder housekeeping: folders of repos no longer
+            // catalogued, and .part files no live job owns. Dry run
+            // unless --yes — deleting downloads must be a decision.
+            let yes = args.iter().any(|a| a == "--yes");
+            let cat = Catalog::load(&path)?;
+            let queue = Queue::load(&queue_path())?;
+            let settings = Settings::load(&settings_path())?;
+            let root = PathBuf::from(&settings.download_dir);
+            let report = clean_downloads(&root, &cat, &queue, !yes)?;
+            if report.stale_folders.is_empty() && report.orphan_parts.is_empty() {
+                println!("Nothing to clean under {}.", root.display());
+                return Ok(());
+            }
+            for f in &report.stale_folders {
+                println!("  folder  {}", f.display());
+            }
+            for f in &report.orphan_parts {
+                println!("  part    {}", f.display());
+            }
+            let mb = report.bytes as f64 / 1_000_000.0;
+            if yes {
+                println!(
+                    "Removed {} item(s), {mb:.1} MB freed.",
+                    report.stale_folders.len() + report.orphan_parts.len()
+                );
+            } else {
+                println!(
+                    "{} item(s), {mb:.1} MB. Dry run — pass --yes to delete.",
+                    report.stale_folders.len() + report.orphan_parts.len()
+                );
+            }
+            Ok(())
+        }
         "remove" => {
             let repo = RepoRef::parse(need(args, 1, "remove <owner/repo>")?).map_err(|e| e.0)?;
             let mut cat = Catalog::load(&path)?;
@@ -328,7 +387,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let settings = Settings::load(&settings_path())?;
             if json_mode {
                 let q = Query::parse(&args[1..].join(" "));
-                let hits = search_execute(&cat, &q);
+                let hits = search_execute(&cat, &q, now_unix());
                 print_entries_json(&hits, &cat);
                 return Ok(());
             }
@@ -661,22 +720,48 @@ fn run(args: &[String]) -> Result<(), String> {
                 println!("Your catalogue is empty.");
                 return Ok(());
             }
-            let mut spent = 0u32;
-            for repo in targets {
-                if cat.get(&repo).is_none() {
+            // Refresh in parallel (bounded by the concurrency setting):
+            // snapshots go out, refreshed copies merge back — the same
+            // shape as check --all.
+            for repo in &targets {
+                if cat.get(repo).is_none() {
                     println!("{repo}: not in the catalogue (add it first).");
-                    continue;
                 }
-                let entry = cat.get_mut(&repo).expect("checked");
-                match refresh_metadata(&fetcher, entry, &policy, tok.as_deref(), now_unix(), force)
-                {
-                    Ok(RefreshOutcome::Updated { quota_spent }) => {
-                        spent += quota_spent;
-                        println!("{repo}: metadata updated.");
-                    }
-                    Ok(RefreshOutcome::NotModified { quota_spent }) => {
-                        spent += quota_spent;
-                        println!("{repo}: unchanged.");
+            }
+            let settings = Settings::load(&settings_path())?;
+            let snapshots: Vec<RepoEntry> =
+                targets.iter().filter_map(|r| cat.get(r).cloned()).collect();
+            let results = refresh_entries_parallel(
+                &fetcher,
+                &snapshots,
+                &policy,
+                tok.as_deref(),
+                now_unix(),
+                force,
+                settings.concurrency as usize,
+            );
+            let mut spent = 0u32;
+            for r in results {
+                let repo = &r.repo;
+                match r.outcome {
+                    Ok(
+                        outcome @ (RefreshOutcome::Updated { .. }
+                        | RefreshOutcome::NotModified { .. }),
+                    ) => {
+                        if let Some(slot) = cat.get_mut(repo) {
+                            *slot = r.entry;
+                        }
+                        match outcome {
+                            RefreshOutcome::Updated { quota_spent } => {
+                                spent += quota_spent;
+                                println!("{repo}: metadata updated.");
+                            }
+                            RefreshOutcome::NotModified { quota_spent } => {
+                                spent += quota_spent;
+                                println!("{repo}: unchanged.");
+                            }
+                            RefreshOutcome::SkippedNotDue => unreachable!(),
+                        }
                     }
                     Ok(RefreshOutcome::SkippedNotDue) => {
                         println!("{repo}: cached metadata is still fresh (policy) — use --force to override.");
@@ -1174,6 +1259,45 @@ fn run(args: &[String]) -> Result<(), String> {
                 curl_ok,
                 "curl is available (network checks and downloads use it)".into(),
             );
+            // Library health (informational, never a failure): what's
+            // stale, what's stuck, and what a `clean` would reclaim.
+            if let (Ok(c), Ok(q)) = (Catalog::load(&path), Queue::load(&queue_path())) {
+                let now = now_unix();
+                let never = c
+                    .entries
+                    .iter()
+                    .filter(|e| e.last_release_check == 0)
+                    .count();
+                let due = c
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        e.last_release_check == 0
+                            || now.saturating_sub(e.last_release_check)
+                                > repostacks_core::search::DUE_CHECK_SECS
+                    })
+                    .count();
+                let failed = q
+                    .jobs
+                    .iter()
+                    .filter(|j| j.status == JobStatus::Failed)
+                    .count();
+                println!(
+                    "INFO  library health: {} never checked, {} due for a check, {} failed job(s)",
+                    never, due, failed
+                );
+                if let Ok(s) = Settings::load(&settings_path()) {
+                    let scan = scan_downloads(&PathBuf::from(&s.download_dir), &c, &q);
+                    let items = scan.stale_folders.len() + scan.orphan_parts.len();
+                    if items > 0 {
+                        println!(
+                            "INFO  clean would reclaim {} item(s), {:.1} MB (run `repostacks clean`)",
+                            items,
+                            scan.bytes as f64 / 1_000_000.0
+                        );
+                    }
+                }
+            }
             if bad > 0 {
                 Err(format!("{bad} check(s) failed"))
             } else {
@@ -1199,13 +1323,15 @@ fn print_help() {
          add <owner/repo|URL>     Add a volume to the catalogue\n  \
          import <file|-> [shelf]  Bulk import, one repo per line, with preview counts\n  \
          import-user <name> [filters]  Import a GitHub user's projects (--owned/--member, --forks/--sources, --with-archived/--only-archived, --public/--private, --dry-run)\n  \
+         export [--json] [file]    Export the catalogue (importable list, or full JSON)\n  \
+         clean [--yes]             Remove stale download folders + orphan .part files (dry run without --yes)\n  \
          remove <owner/repo>       Remove a volume (and its shelf places)\n  \
          list                      List the catalogue with install/update badges\n  \
          shelf add <name> <repo>   Put a volume on a shelf\n  \
          shelf list <name>         Show a shelf\n  \
          search <text>             Search name, description, language, topics\n  \
          facets                    Language and topic counts for the filter panel\n  \
-         find <query>              Rich search: lang: topic: license: owner: shelf:NAME tag:v1 stars:>1000 has:update is:installed sort:-stars limit:10\n  \
+         find <query>              Rich search: lang: topic: license: owner: shelf:NAME tag:v1 stars:>1000 has:update is:installed is:due sort:-stars limit:10; prefix any term with - to exclude it\n  \
          search save|list|run|delete  Saved searches\n  \
          view [layout|theme|density|group-by|columns|facets|reset]  Presentation settings\n  \
          feed-url <owner/repo>     Print the releases Atom feed URL (quota-free checks)\n  \

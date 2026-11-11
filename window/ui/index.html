@@ -25,6 +25,15 @@
   <section id="screen-catalogue" class="screen">
     <aside id="facet-panel">
       <div class="facet-head">Filters <button id="clear-filters" class="small">Clear all</button></div>
+      <h4>Saved searches</h4>
+      <div class="saved-box">
+        <select id="saved-select" aria-label="Apply a saved search"><option value="">Choose a saved search…</option></select>
+        <div class="row">
+          <input id="saved-name" type="text" placeholder="Name the current search" aria-label="Name for the current search">
+          <button id="saved-save" class="small">Save</button>
+          <button id="saved-delete" class="small">Delete</button>
+        </div>
+      </div>
       <h4>Language</h4>
       <div id="facet-languages" class="facet-list"></div>
       <h4>Topic</h4>
@@ -70,10 +79,13 @@
           <option value="status">Status</option>
         </select>
       </label>
+      <div class="view-row">Ledger columns
+        <div id="view-columns" class="facet-list"></div>
+      </div>
     </aside>
     <div id="catalogue-main">
       <div class="toolbar">
-        <span id="result-count"></span>
+        <span id="result-count" role="status" aria-live="polite"></span>
         <label class="sort-row">Sort
           <select id="sort-select" aria-label="Sort the catalogue">
             <option value="">Catalogue order</option>
@@ -119,6 +131,7 @@
       <h2>Acquisitions</h2>
       <span class="spacer"></span>
       <button id="queue-run">Run queue</button>
+      <button id="queue-retry-all">Retry all failed</button>
       <button id="queue-clear">Clear finished</button>
     </div>
     <div id="queue-list"></div>
@@ -140,6 +153,7 @@
           <input id="cfg-conc" type="number" min="1" max="16"></label>
         <label>Downloads folder (relative to the app, or a full path)
           <input id="cfg-dir" type="text"></label>
+        <label class="check"><input type="checkbox" id="cfg-onstart"> Run a Librarian pass when the app opens</label>
         <button id="cfg-save">Save settings</button>
         <p class="note">Release checks ride Atom feeds and cost no API quota.
         Metadata refresh reports exactly what it spends: 60 requests/hour

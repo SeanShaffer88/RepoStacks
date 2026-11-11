@@ -186,6 +186,57 @@ pub fn check_entries_parallel<F: Fetcher + Sync>(
     out
 }
 
+/// One entry's parallel metadata refresh: the outcome plus the entry
+/// clone carrying the refreshed fields (or the untouched clone on error).
+pub struct ParallelRefresh {
+    pub repo: crate::repo_ref::RepoRef,
+    pub outcome: Result<RefreshOutcome, String>,
+    pub entry: RepoEntry,
+}
+
+/// Refresh many entries' metadata in parallel — the same chunked scoped
+/// threads as `check_entries_parallel`. A sequential refresh of a large
+/// catalogue costs one network round-trip per repo; this bounds the
+/// wall-clock by the concurrency instead. Results keep input order.
+#[allow(clippy::too_many_arguments)]
+pub fn refresh_entries_parallel<F: Fetcher + Sync>(
+    fetcher: &F,
+    entries: &[RepoEntry],
+    policy: &CachePolicy,
+    token: Option<&str>,
+    now_unix: u64,
+    force: bool,
+    concurrency: usize,
+) -> Vec<ParallelRefresh> {
+    let stride = concurrency.max(1);
+    let mut out = Vec::with_capacity(entries.len());
+    for chunk in entries.chunks(stride) {
+        let results: Vec<ParallelRefresh> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|e| {
+                    scope.spawn(move || {
+                        let mut entry = e.clone();
+                        let outcome =
+                            refresh_metadata(fetcher, &mut entry, policy, token, now_unix, force);
+                        ParallelRefresh {
+                            repo: entry.repo.clone(),
+                            outcome,
+                            entry,
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("refresh worker panicked"))
+                .collect()
+        });
+        out.extend(results);
+    }
+    out
+}
+
 pub fn auth_for_token(token: Option<&str>) -> Auth {
     match token {
         Some(t) if !t.is_empty() => Auth::Token,

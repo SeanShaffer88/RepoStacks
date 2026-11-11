@@ -31,7 +31,11 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.3.0: import a GitHub user's whole project list with filters (owned/member,
+v0.4.0: a second enhancement round — search negation and due-for-check
+filters, parallel metadata refresh, catalogue export, download-folder
+cleaning, window saved searches and column picker, Open on GitHub, and
+keyboard-openable entries throughout. Before that, v0.3.0 added importing
+a GitHub user's whole project list with filters (owned/member,
 forks/originals, archived, public/private) from the window or the command
 line. The core library, command line, live network fetching, download engine,
 and the window are built, with corruption-proof state files, parallel release
@@ -52,6 +56,9 @@ Examples:
 repostacks-cli add rust-lang/rust
 repostacks-cli import-user SeanShaffer88 --dry-run
 repostacks-cli import-user SeanShaffer88 --sources
+repostacks-cli find "lang:rust -topic:games is:due"
+repostacks-cli export > my-library.txt
+repostacks-cli clean
 repostacks-cli shelf add "Dev Tools" rust-lang/rust
 repostacks-cli list
 repostacks-cli search compiler

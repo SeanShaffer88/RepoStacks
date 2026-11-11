@@ -59,6 +59,20 @@
 - Post-install steps remain out of scope by design (see ARCHITECTURE): the library
   downloads and verifies; it never runs anything it fetched.
 
+## Built (round-2 enhancement slice, v0.4.0)
+- Search negation (`-term` for every filter kind) and freshness filters
+  (`is:due`, `is:never`); the query engine takes the clock explicitly.
+- Parallel metadata refresh everywhere; set-based dedup for bulk imports.
+- CLI `export` (list or full JSON) and `clean` (stale download folders +
+  orphan `.part` files, dry-run first); `doctor` library-health lines.
+- Window: Open on GitHub / Open download folder, check-on-start setting,
+  saved-search management in the filter panel, ledger column picker,
+  Retry all failed, failure-reporting toasts, scheduler panic guard.
+- Accessibility: keyboard-openable entries in all layouts, Add-dialog
+  focus trap, Ctrl+F search focus, live result count.
+- Safety: fsync before atomic rename; asset-name/tag path validation in
+  the planner and the engine.
+
 ## Built (user import slice, v0.3.0)
 - **Import a GitHub user's projects** (CLI `import-user`, Add Volumes dialog):
   paginated listing (100 per page, one API call each, spend reported), filters

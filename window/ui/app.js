@@ -51,7 +51,7 @@ function statusBadge(e) {
   if (e.status === "Installed") return `<span class="badge installed">✔ Installed</span>`;
   if (e.status === "Update available") return `<span class="badge update">⬆ Update</span>`;
   if (e.status === "Not installed") return `<span class="badge">Not installed</span>`;
-  return `<span class="badge">${e.status}</span>`;
+  return `<span class="badge">${esc(e.status)}</span>`;
 }
 function fmtStars(n) {
   return n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n);
@@ -145,8 +145,7 @@ function renderEntries() {
     else html += renderDiagram(members);
   }
   host.innerHTML = html;
-  host.querySelectorAll("[data-repo]").forEach((el) =>
-    el.addEventListener("click", () => openDetail(el.dataset.repo)));
+  bindEntryOpen(host);
 }
 
 const COLUMNS = {
@@ -227,12 +226,12 @@ async function refreshFacets() {
   fill($("#facet-languages"), f.languages, "lang");
   fill($("#facet-topics"), f.topics, "topic");
   fill($("#facet-licenses"), f.licenses, "license");
-  $$("#facet-panel input[type=checkbox]").forEach((cb) =>
+  $$("#facet-languages input[type=checkbox], #facet-topics input[type=checkbox], #facet-licenses input[type=checkbox], #facet-status input[type=checkbox]").forEach((cb) =>
     cb.addEventListener("change", composeFacetQuery));
 }
 function composeFacetQuery() {
   const terms = [];
-  $$("#facet-panel input[type=checkbox]:checked").forEach((cb) => {
+  $$("#facet-languages input[type=checkbox]:checked, #facet-topics input[type=checkbox]:checked, #facet-licenses input[type=checkbox]:checked, #facet-status input[type=checkbox]:checked").forEach((cb) => {
     if (cb.dataset.facet) terms.push(cb.dataset.facet);
     if (cb.dataset.status) terms.push(cb.dataset.status);
   });
@@ -240,7 +239,7 @@ function composeFacetQuery() {
   refreshCatalogue();
 }
 $("#clear-filters").addEventListener("click", () => {
-  $$("#facet-panel input[type=checkbox]").forEach((cb) => (cb.checked = false));
+  $$("#facet-languages input[type=checkbox], #facet-topics input[type=checkbox], #facet-licenses input[type=checkbox], #facet-status input[type=checkbox]").forEach((cb) => (cb.checked = false));
   $("#global-search").value = "";
   state.facetQuery = "";
   refreshCatalogue();
@@ -254,13 +253,24 @@ $("#check-now").addEventListener("click", async () => {
   toast("Checking every volume via Atom feeds…");
   const res = await call("check_all");
   const changed = res.filter((r) => r.changed).length;
-  toast(`Checked ${res.length} volume(s) — ${changed} new release(s). No API quota used.`);
+  const failed = res.filter((r) => r.error);
+  // Failures are said out loud, not left in the log: name the count and
+  // the first reason so a dead feed is visible at a glance.
+  toast(
+    `Checked ${res.length} volume(s) — ${changed} new release(s). No API quota used.` +
+      (failed.length ? ` ${failed.length} failed: ${failed[0].repo} (${failed[0].error})` : ""),
+    failed.length > 0
+  );
   refreshCatalogue();
 });
 $("#refresh-meta").addEventListener("click", async () => {
   toast("Refreshing metadata…");
   const r = await call("refresh_all", { force: false });
-  toast(`Metadata: ${r.updated} updated, ${r.unchanged} unchanged, ${r.skipped} cached — ${r.spent}/${r.limit} API calls this hour.`);
+  toast(
+    `Metadata: ${r.updated} updated, ${r.unchanged} unchanged, ${r.skipped} cached — ${r.spent}/${r.limit} API calls this hour.` +
+      (r.errors.length ? ` ${r.errors.length} failed: ${r.errors[0]}` : ""),
+    r.errors.length > 0
+  );
   refreshFacets();
   refreshCatalogue();
 });
@@ -280,6 +290,63 @@ async function applyView() {
 for (const [id, key] of [["#view-layout", "layout"], ["#view-theme", "theme"], ["#view-density", "density"], ["#view-group", "group_by"]]) {
   $(id).addEventListener("change", (ev) => { state.view[key] = ev.target.value; applyView(); });
 }
+
+// Ledger columns picker: state.view.columns empty means "all columns".
+function buildColumnPicker() {
+  const host = $("#view-columns");
+  const active = state.view.columns.length ? state.view.columns : Object.keys(COLUMNS);
+  host.innerHTML = Object.keys(COLUMNS).map((k) =>
+    `<label><input type="checkbox" data-col="${k}" ${active.includes(k) ? "checked" : ""}> ${COLUMNS[k].head}</label>`).join("");
+  host.querySelectorAll("input[data-col]").forEach((cb) =>
+    cb.addEventListener("change", () => {
+      const picked = [...host.querySelectorAll("input[data-col]:checked")].map((x) => x.dataset.col);
+      if (!picked.length) {
+        cb.checked = true;
+        toast("Keep at least one column.", true);
+        return;
+      }
+      state.view.columns = picked.length === Object.keys(COLUMNS).length ? [] : picked;
+      applyView();
+    }));
+}
+
+// ---------- Saved searches ----------
+function fillSavedSelect(map) {
+  const sel = $("#saved-select");
+  const names = Object.keys(map || {});
+  sel.innerHTML = `<option value="">Choose a saved search…</option>` +
+    names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+}
+async function refreshSaved() {
+  fillSavedSelect(await call("saved_list"));
+}
+$("#saved-select").addEventListener("change", async (ev) => {
+  const name = ev.target.value;
+  if (!name) return;
+  const map = await call("saved_list");
+  const q = map[name];
+  if (q === undefined) return;
+  $$("#facet-languages input[type=checkbox], #facet-topics input[type=checkbox], #facet-licenses input[type=checkbox], #facet-status input[type=checkbox]")
+    .forEach((cb) => (cb.checked = false));
+  state.facetQuery = "";
+  $("#global-search").value = q;
+  refreshCatalogue();
+});
+$("#saved-save").addEventListener("click", async () => {
+  const name = $("#saved-name").value.trim();
+  if (!name) { toast("Name the search first.", true); return; }
+  const map = await call("saved_save", { name, query: currentQuery() });
+  fillSavedSelect(map);
+  $("#saved-select").value = name;
+  $("#saved-name").value = "";
+  toast(`Saved search "${name}".`);
+});
+$("#saved-delete").addEventListener("click", async () => {
+  const name = $("#saved-select").value;
+  if (!name) { toast("Choose a saved search to delete.", true); return; }
+  fillSavedSelect(await call("saved_delete", { name }));
+  toast(`Deleted saved search "${name}".`);
+});
 
 // ---------- Detail ----------
 async function openDetail(fullName) {
@@ -301,6 +368,8 @@ async function openDetail(fullName) {
         <div class="row">
           <button id="detail-download" class="primary">⬇ Download ${esc(e.latest_tag || "")}</button>
           <button id="detail-check">Check for updates</button>
+          <button id="detail-github">Open on GitHub</button>
+          ${e.installed_tag ? '<button id="detail-folder">Open download folder</button>' : ""}
           <button id="detail-remove">Remove volume</button>
         </div>
       </div>
@@ -364,9 +433,18 @@ async function openDetail(fullName) {
     openDetail(e.full_name);
   });
   $("#detail-check").addEventListener("click", async () => {
-    await call("check_all");
+    const res = await call("check_all");
+    const mine = res.find((r) => r.repo.toLowerCase() === e.full_name.toLowerCase());
+    if (mine && mine.error) toast(`${e.full_name}: ${mine.error}`, true);
     openDetail(e.full_name);
   });
+  $("#detail-github").addEventListener("click", () =>
+    call("open_repo_page", { repo: e.full_name }));
+  const folderBtn = $("#detail-folder");
+  if (folderBtn) {
+    folderBtn.addEventListener("click", () =>
+      call("open_download_folder", { repo: e.full_name }));
+  }
   $("#detail-remove").addEventListener("click", async (ev) => {
     // Removing a volume is destructive, so the button arms first:
     // one click asks, the second confirms. No dialog to dismiss.
@@ -396,6 +474,23 @@ async function openDetail(fullName) {
   }
 }
 
+// Every [data-repo] element opens its volume — by click or by keyboard
+// (Enter/Space), so the catalogue is fully usable without a mouse.
+function bindEntryOpen(host) {
+  host.querySelectorAll("[data-repo]").forEach((el) => {
+    el.addEventListener("click", () => openDetail(el.dataset.repo));
+    el.tabIndex = 0;
+    el.setAttribute("role", "link");
+    el.setAttribute("aria-label", `Open ${el.dataset.repo}`);
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        openDetail(el.dataset.repo);
+      }
+    });
+  });
+}
+
 // ---------- Shelves screen ----------
 async function refreshShelves() {
   const data = await call("list_shelves");
@@ -419,8 +514,7 @@ async function refreshShelves() {
         </div>`;
       }).join("")}</div>
     </div>`).join("");
-  host.querySelectorAll("[data-repo]").forEach((el) =>
-    el.addEventListener("click", () => openDetail(el.dataset.repo)));
+  bindEntryOpen(host);
 }
 
 // ---------- My Shelf ----------
@@ -492,6 +586,15 @@ $("#queue-clear").addEventListener("click", async () => {
   toast(`Cleared ${n} finished job(s).`);
   refreshQueue();
 });
+$("#queue-retry-all").addEventListener("click", async () => {
+  const jobs = await call("queue_list");
+  const failed = jobs.filter((j) => j.status === "failed");
+  if (!failed.length) { toast("No failed jobs to retry."); return; }
+  for (const j of failed) await call("queue_retry", { id: j.id });
+  toast(`Retrying ${failed.length} failed job(s)…`);
+  await call("queue_run");
+  refreshQueue();
+});
 
 // ---------- Librarian ----------
 async function refreshLibrarian() {
@@ -500,6 +603,7 @@ async function refreshLibrarian() {
   $("#cfg-meta").value = Math.round(cfg.metadata_poll_secs / 60);
   $("#cfg-conc").value = cfg.concurrency;
   $("#cfg-dir").value = cfg.download_dir;
+  $("#cfg-onstart").checked = !!cfg.check_on_start;
   $("#token-state").textContent = cfg.has_token
     ? "A token is stored (DPAPI-protected) — API budget 5,000/hour."
     : "No token stored — anonymous mode, API budget 60/hour. Release checks are free either way.";
@@ -513,6 +617,7 @@ $("#cfg-save").addEventListener("click", async () => {
       concurrency: Number($("#cfg-conc").value) || 3,
       atom_poll_secs: (Number($("#cfg-atom").value) || 360) * 60,
       metadata_poll_secs: (Number($("#cfg-meta").value) || 1440) * 60,
+      check_on_start: $("#cfg-onstart").checked,
       has_token: false,
     },
   });
@@ -563,19 +668,35 @@ $("#add-close").addEventListener("click", closeAddModal);
 $("#add-cancel").addEventListener("click", closeAddModal);
 
 // ---------- Keyboard ----------
-// Ctrl+K jumps to the search box from anywhere; "/" does the same when
-// not already typing; Esc closes the Add modal.
+// Ctrl+K or Ctrl+F jumps to the search box from anywhere; "/" does the
+// same when not already typing; Esc closes the Add modal; Tab stays
+// inside the open modal (a focus trap, so keyboard users can't tab
+// into the page behind it).
 document.addEventListener("keydown", (ev) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
-  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "k") {
+  const modalOpen = !$("#add-modal").classList.contains("hidden");
+  if ((ev.ctrlKey || ev.metaKey) && ["k", "f"].includes(ev.key.toLowerCase())) {
     ev.preventDefault();
     $("#global-search").focus();
     $("#global-search").select();
   } else if (ev.key === "/" && !typing) {
     ev.preventDefault();
     $("#global-search").focus();
-  } else if (ev.key === "Escape" && !$("#add-modal").classList.contains("hidden")) {
+  } else if (ev.key === "Escape" && modalOpen) {
     closeAddModal();
+  } else if (ev.key === "Tab" && modalOpen) {
+    const focusables = $$("#add-modal button, #add-modal input, #add-modal textarea, #add-modal select, #add-modal [tabindex]")
+      .filter((el) => !el.disabled && el.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
   }
 });
 $("#add-go").addEventListener("click", async () => {
@@ -654,6 +775,8 @@ $("#iu-go").addEventListener("click", async () => {
   $("#view-theme").value = state.view.theme;
   $("#view-density").value = state.view.density;
   $("#view-group").value = state.view.group_by;
+  buildColumnPicker();
+  refreshSaved();
   await refreshFacets();
   await refreshCatalogue();
   const ov = await call("overview");

@@ -3,7 +3,7 @@
 
 use crate::json::Json;
 use crate::repo_ref::RepoRef;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -200,6 +200,13 @@ impl Catalog {
     /// what was already present, and what did not parse — the preview the
     /// Add Volumes dialog shows before anything is committed.
     pub fn import_list(&mut self, text: &str) -> ImportReport {
+        // Membership is checked against a set built once: with thousands
+        // of volumes, a linear get() per line makes imports quadratic.
+        let mut present: HashSet<String> = self
+            .entries
+            .iter()
+            .map(|e| e.repo.full_name().to_lowercase())
+            .collect();
         let mut report = ImportReport::default();
         for raw in text.lines() {
             let line = raw.trim();
@@ -208,7 +215,10 @@ impl Catalog {
             }
             match RepoRef::parse(line) {
                 Ok(repo) => {
-                    if self.add(repo.clone()) {
+                    if present.insert(repo.full_name().to_lowercase()) {
+                        let mut entry = RepoEntry::new(repo.clone());
+                        entry.added_unix = now_unix();
+                        self.entries.push(entry);
                         report.added.push(repo.full_name());
                     } else {
                         report.duplicates.push(repo.full_name());
@@ -218,6 +228,31 @@ impl Catalog {
             }
         }
         report
+    }
+
+    /// The catalogue as an importable list (one `owner/repo` per line,
+    /// shelf membership as a comment block the importer skips). Pairs
+    /// with `import_list` for moving a library between machines; the
+    /// full-fidelity form is the catalogue JSON itself.
+    pub fn export_list(&self) -> String {
+        let mut out = format!(
+            "# RepoStacks catalogue export — {} volume(s)\n",
+            self.entries.len()
+        );
+        for e in &self.entries {
+            out.push_str(&e.repo.full_name());
+            out.push('\n');
+        }
+        for (shelf, members) in &self.shelves {
+            if members.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("# shelf: {shelf}\n"));
+            for m in members {
+                out.push_str(&format!("#   {m}\n"));
+            }
+        }
+        out
     }
 
     pub fn get(&self, repo: &RepoRef) -> Option<&RepoEntry> {

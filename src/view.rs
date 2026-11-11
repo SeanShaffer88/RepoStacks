@@ -338,6 +338,10 @@ pub struct Settings {
     pub atom_poll_secs: u64,
     /// Librarian schedule: seconds between metadata refreshes.
     pub metadata_poll_secs: u64,
+    /// Run a Librarian pass (checks + metadata + standing orders) once
+    /// when the window opens. Off by default — opening the app should
+    /// not spend quota unless the user asked for it.
+    pub check_on_start: bool,
     /// Optional GitHub token, DPAPI-protected and base64-encoded by the
     /// window. Never a plain token; the CLI uses REPOSTACKS_TOKEN instead.
     pub token_protected: String,
@@ -352,6 +356,7 @@ impl Default for Settings {
             concurrency: 3,
             atom_poll_secs: 21_600,
             metadata_poll_secs: 86_400,
+            check_on_start: false,
             token_protected: String::new(),
         }
     }
@@ -384,6 +389,7 @@ impl Settings {
                 "metadata_poll_secs".into(),
                 Json::Num(self.metadata_poll_secs as f64),
             ),
+            ("check_on_start".into(), Json::Bool(self.check_on_start)),
             (
                 "token_protected".into(),
                 Json::Str(self.token_protected.clone()),
@@ -431,6 +437,9 @@ impl Settings {
         }
         if let Some(tok) = v.get("token_protected").and_then(Json::as_str) {
             s.token_protected = tok.to_string();
+        }
+        if let Some(b) = v.get("check_on_start").and_then(Json::as_bool) {
+            s.check_on_start = b;
         }
         Ok(s)
     }

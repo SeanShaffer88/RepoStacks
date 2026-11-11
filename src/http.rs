@@ -21,6 +21,7 @@ pub struct FetchResponse {
 /// download. CREATE_NO_WINDOW suppresses it; elsewhere this is just a
 /// plain command.
 pub fn hidden_command(program: &str) -> std::process::Command {
+    #[allow(unused_mut)] // mutated only on Windows (creation_flags)
     let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
     {

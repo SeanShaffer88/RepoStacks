@@ -33,6 +33,13 @@ pub fn save_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     }
     let tmp = sibling(path, ".tmp");
     std::fs::write(&tmp, text)?;
+    // Flush the temp file to disk before the rename: rename alone is
+    // atomic for readers, but without a sync a power cut can still lose
+    // the new contents on filesystems that delay data writes. Best
+    // effort — a sync failure must never block saving.
+    if let Ok(f) = std::fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
     if path.exists() {
         // The outgoing file becomes the backup before the new one lands,
         // so a crash anywhere in here leaves one good copy behind.

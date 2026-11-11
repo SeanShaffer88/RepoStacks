@@ -32,3 +32,10 @@
 | Settings validation | yes | yes | yes | view tests |
 | Librarian metadata refresh (quota-governed) | yes | — | yes | window librarian pass |
 | Import a user's projects with filters | yes | yes | yes | user_import tests + live CLI run (312-repo listing, paginated) |
+| Search negation + is:due/is:never | yes | yes | yes (find box) | search tests with fixed clock |
+| Export catalogue (list / JSON) | yes | yes | — (CLI) | live CLI run |
+| Clean stale downloads | yes | yes | — (CLI) | download tests (temp tree) + live CLI run |
+| Parallel metadata refresh | yes | yes | yes | net helper shared by all three |
+| Open on GitHub / download folder | — | — | yes | window commands (validated RepoRef / own layout) |
+| Check on start (setting) | yes (settings) | — | yes | Settings round-trip |
+| Saved searches in the window | yes | yes | yes | saved_list/save/delete commands |

@@ -12,7 +12,8 @@ use repostacks_core::download::{enqueue_download, plan_download, run_pending};
 use repostacks_core::http::{CurlDownloader, CurlFetcher, Fetcher};
 use repostacks_core::catalog::RepoEntry;
 use repostacks_core::net::{
-    auth_for_token, check_entries_parallel, fetch_release_assets, refresh_metadata, RefreshOutcome,
+    auth_for_token, check_entries_parallel, fetch_release_assets, refresh_entries_parallel,
+    RefreshOutcome,
 };
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::user_import::{
@@ -237,7 +238,7 @@ fn overview(state: State<'_, AppState>) -> Result<OverviewDto, String> {
 fn find_entries(state: State<'_, AppState>, query: String) -> Result<Vec<EntryDto>, String> {
     let inner = state.inner.lock().unwrap();
     let q = Query::parse(&query);
-    let hits = search_execute(&inner.catalog, &q);
+    let hits = search_execute(&inner.catalog, &q, now_unix());
     Ok(hits.iter().map(|e| entry_dto(e, &inner.catalog)).collect())
 }
 
@@ -308,6 +309,94 @@ fn import_apply(
         "duplicates": report.duplicates,
         "invalid": report.invalid.iter().map(|(l, w)| serde_json::json!([l, w])).collect::<Vec<_>>(),
     }))
+}
+
+/// Open a URL or folder with the OS default handler. The URL is built
+/// from a validated RepoRef and the folder from our own layout — never
+/// from free-form input.
+fn open_external(target: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        if target.starts_with("https://") {
+            std::process::Command::new("rundll32")
+                .args(["url.dll,FileProtocolHandler", target])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| format!("open browser: {e}"))?;
+        } else {
+            std::process::Command::new("explorer")
+                .arg(target)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| format!("open folder: {e}"))?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        std::process::Command::new(opener)
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("open: {e}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_repo_page(repo: String) -> Result<(), String> {
+    let r = RepoRef::parse(&repo).map_err(|e| e.0)?;
+    open_external(&format!("https://github.com/{}/{}", r.owner, r.name))
+}
+
+#[tauri::command]
+fn open_download_folder(state: State<'_, AppState>, repo: String) -> Result<(), String> {
+    let r = RepoRef::parse(&repo).map_err(|e| e.0)?;
+    let root = {
+        let inner = state.inner.lock().unwrap();
+        state.downloads_root(&inner.settings)
+    };
+    let dir = root.join(format!("{}-{}", r.owner, r.name));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    open_external(&dir.to_string_lossy())
+}
+
+/// The saved searches from settings, as name → query pairs.
+#[tauri::command]
+fn saved_list(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let inner = state.inner.lock().unwrap();
+    Ok(serde_json::to_value(&inner.settings.saved_searches)
+        .map_err(|e| format!("encode saved searches: {e}"))?)
+}
+
+#[tauri::command]
+fn saved_save(
+    state: State<'_, AppState>,
+    name: String,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("A saved search needs a name.".into());
+    }
+    let mut inner = state.inner.lock().unwrap();
+    inner
+        .settings
+        .saved_searches
+        .insert(name, query.trim().to_string());
+    state.save_settings(&inner)?;
+    Ok(serde_json::to_value(&inner.settings.saved_searches)
+        .map_err(|e| format!("encode saved searches: {e}"))?)
+}
+
+#[tauri::command]
+fn saved_delete(state: State<'_, AppState>, name: String) -> Result<serde_json::Value, String> {
+    let mut inner = state.inner.lock().unwrap();
+    inner.settings.saved_searches.remove(&name);
+    state.save_settings(&inner)?;
+    Ok(serde_json::to_value(&inner.settings.saved_searches)
+        .map_err(|e| format!("encode saved searches: {e}"))?)
 }
 
 #[derive(serde::Deserialize)]
@@ -503,9 +592,13 @@ fn check_all(state: State<'_, AppState>) -> Result<Vec<CheckDto>, String> {
 fn refresh_all(state: State<'_, AppState>, force: bool) -> Result<serde_json::Value, String> {
     // Same snapshot pattern as check_all: the REST calls run on clones
     // without the state lock, then only the refreshed fields merge back.
-    let (entries, token) = {
+    let (entries, token, concurrency) = {
         let inner = state.inner.lock().unwrap();
-        (inner.catalog.entries.clone(), state.token(&inner))
+        (
+            inner.catalog.entries.clone(),
+            state.token(&inner),
+            inner.settings.concurrency as usize,
+        )
     };
     let policy = CachePolicy::for_auth(auth_for_token(token.as_deref()));
     let fetcher = CurlFetcher::default();
@@ -513,21 +606,31 @@ fn refresh_all(state: State<'_, AppState>, force: bool) -> Result<serde_json::Va
     let (mut updated, mut unchanged, mut skipped, mut spent) = (0, 0, 0, 0u32);
     let mut errors = Vec::new();
     let mut refreshed: Vec<RepoEntry> = Vec::new();
-    for mut entry in entries {
-        let repo = entry.repo.clone();
-        match refresh_metadata(&fetcher, &mut entry, &policy, token.as_deref(), now, force) {
+    // Parallel, bounded by the concurrency setting — a sequential pass
+    // over a large catalogue costs one round-trip per repo.
+    let results = refresh_entries_parallel(
+        &fetcher,
+        &entries,
+        &policy,
+        token.as_deref(),
+        now,
+        force,
+        concurrency,
+    );
+    for r in results {
+        match r.outcome {
             Ok(RefreshOutcome::Updated { quota_spent }) => {
                 updated += 1;
                 spent += quota_spent;
-                refreshed.push(entry);
+                refreshed.push(r.entry);
             }
             Ok(RefreshOutcome::NotModified { quota_spent }) => {
                 unchanged += 1;
                 spent += quota_spent;
-                refreshed.push(entry);
+                refreshed.push(r.entry);
             }
             Ok(RefreshOutcome::SkippedNotDue) => skipped += 1,
-            Err(msg) => errors.push(format!("{repo}: {msg}")),
+            Err(msg) => errors.push(format!("{}: {msg}", r.repo)),
         }
     }
     let mut inner = state.inner.lock().unwrap();
@@ -793,6 +896,7 @@ struct ConfigDto {
     concurrency: u32,
     atom_poll_secs: u64,
     metadata_poll_secs: u64,
+    check_on_start: bool,
     has_token: bool,
 }
 
@@ -804,6 +908,7 @@ fn get_config(state: State<'_, AppState>) -> Result<ConfigDto, String> {
         concurrency: inner.settings.concurrency,
         atom_poll_secs: inner.settings.atom_poll_secs,
         metadata_poll_secs: inner.settings.metadata_poll_secs,
+        check_on_start: inner.settings.check_on_start,
         has_token: state.token(&inner).is_some(),
     })
 }
@@ -818,11 +923,13 @@ fn set_config(state: State<'_, AppState>, config: ConfigDto) -> Result<(), Strin
     candidate.concurrency = config.concurrency;
     candidate.atom_poll_secs = config.atom_poll_secs;
     candidate.metadata_poll_secs = config.metadata_poll_secs;
+    candidate.check_on_start = config.check_on_start;
     candidate.validate()?;
     inner.settings.download_dir = candidate.download_dir;
     inner.settings.concurrency = candidate.concurrency;
     inner.settings.atom_poll_secs = candidate.atom_poll_secs;
     inner.settings.metadata_poll_secs = candidate.metadata_poll_secs;
+    inner.settings.check_on_start = candidate.check_on_start;
     state.save_settings(&inner)
 }
 
@@ -940,16 +1047,25 @@ fn librarian_pass(state: &AppState) -> Vec<String> {
         let policy = CachePolicy::for_auth(auth_for_token(token.as_deref()));
         let (mut updated, mut spent) = (0usize, 0u32);
         let mut refreshed: Vec<RepoEntry> = Vec::new();
-        for mut entry in entries {
-            match refresh_metadata(&fetcher, &mut entry, &policy, token.as_deref(), now, false) {
+        let results = refresh_entries_parallel(
+            &fetcher,
+            &entries,
+            &policy,
+            token.as_deref(),
+            now,
+            false,
+            settings_snapshot.concurrency as usize,
+        );
+        for r in results {
+            match r.outcome {
                 Ok(RefreshOutcome::Updated { quota_spent }) => {
                     updated += 1;
                     spent += quota_spent;
-                    refreshed.push(entry);
+                    refreshed.push(r.entry);
                 }
                 Ok(RefreshOutcome::NotModified { quota_spent }) => {
                     spent += quota_spent;
-                    refreshed.push(entry);
+                    refreshed.push(r.entry);
                 }
                 _ => {}
             }
@@ -992,7 +1108,22 @@ fn scheduler_loop(handle: AppHandle) {
         };
         if due {
             let state = handle.state::<AppState>();
-            let lines = librarian_pass(&state);
+            // A panicking pass must never kill the scheduler thread —
+            // without it, the Librarian would silently stop forever.
+            let lines = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                librarian_pass(&state)
+            })) {
+                Ok(lines) => lines,
+                Err(_) => {
+                    let mut inner = state.inner.lock().unwrap();
+                    log(
+                        &mut inner,
+                        "Librarian pass hit an internal error; it will retry on the next interval.".into(),
+                    );
+                    let lines: Vec<String> = inner.activity.iter().rev().take(1).cloned().collect();
+                    lines
+                }
+            };
             if !lines.is_empty() {
                 let _ = handle.emit("librarian-activity", lines);
             }
@@ -1049,6 +1180,28 @@ fn main() {
         .manage(state)
         .setup(|app| {
             let handle = app.handle().clone();
+            // Optional check-on-start: one Librarian pass shortly after
+            // launch, on its own thread so the window opens instantly.
+            {
+                let state = handle.state::<AppState>();
+                let (on, has_volumes) = {
+                    let inner = state.inner.lock().unwrap();
+                    (
+                        inner.settings.check_on_start,
+                        !inner.catalog.entries.is_empty(),
+                    )
+                };
+                if on && has_volumes {
+                    let handle2 = handle.clone();
+                    std::thread::spawn(move || {
+                        let state = handle2.state::<AppState>();
+                        let lines = librarian_pass(&state);
+                        if !lines.is_empty() {
+                            let _ = handle2.emit("librarian-activity", lines);
+                        }
+                    });
+                }
+            }
             std::thread::spawn(move || scheduler_loop(handle));
             Ok(())
         })
@@ -1060,6 +1213,11 @@ fn main() {
             remove_repo,
             import_apply,
             import_user,
+            open_repo_page,
+            open_download_folder,
+            saved_list,
+            saved_save,
+            saved_delete,
             list_shelves,
             shelf_add,
             shelf_remove,

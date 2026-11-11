@@ -3,13 +3,13 @@
 //! GitHub publishes), and land the file where the catalogue says it lives:
 //! `<download root>/<owner>-<repo>/<tag>/<asset>`.
 
-use crate::catalog::RepoEntry;
+use crate::catalog::{Catalog, RepoEntry};
 use crate::glob_match::{glob_match, select_assets};
 use crate::http::Downloader;
 use crate::net::ReleaseAsset;
 use crate::queue::{DownloadJob, JobStatus, Queue};
 use crate::sha256::sha256_file_hex;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlannedDownload {
@@ -106,6 +106,8 @@ pub fn plan_download(
         .find(|a| a.name == chosen_name)
         .expect("chosen from the same list");
     validate_download_url(&asset.url)?;
+    validate_asset_name(&asset.name)?;
+    validate_asset_name(tag).map_err(|e| format!("unsafe release tag: {e}"))?;
     let dir = dest_dir(root, entry, tag);
     let expected = asset
         .digest
@@ -203,12 +205,52 @@ pub struct JobOutcome {
 /// Execute one job from a snapshot of its fields. Pure with respect to the
 /// queue and catalogue — `run_pending` applies the outcome — so worker
 /// threads never share mutable state.
+/// An asset name becomes a file name inside the library folder, so it
+/// must be a plain file name: no path separators, no parent traversal,
+/// no drive or root forms. GitHub asset names are plain in practice —
+/// this is defense in depth on API data.
+pub fn validate_asset_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.chars().any(|c| c.is_control())
+    {
+        return Err(format!("unsafe asset name '{name}'"));
+    }
+    Ok(())
+}
+
 pub fn execute_job<D: Downloader>(
     job: &DownloadJob,
     downloader: &D,
     root: &std::path::Path,
     token: Option<&str>,
 ) -> JobOutcome {
+    // A persisted job's asset name is re-validated before it becomes a
+    // path — the queue file is user-editable text.
+    if let Err(e) = validate_asset_name(&job.asset_name) {
+        return JobOutcome {
+            id: job.id,
+            status: JobStatus::Failed,
+            bytes_done: 0,
+            sha256: String::new(),
+            error: e,
+            final_path: PathBuf::new(),
+        };
+    }
+    if let Err(e) = validate_asset_name(&job.tag) {
+        return JobOutcome {
+            id: job.id,
+            status: JobStatus::Failed,
+            bytes_done: 0,
+            sha256: String::new(),
+            error: format!("unsafe release tag: {e}"),
+            final_path: PathBuf::new(),
+        };
+    }
     let dir = root
         .join(format!("{}-{}", job.repo.owner, job.repo.name))
         .join(&job.tag);
@@ -333,6 +375,133 @@ pub fn run_pending<D: Downloader + Sync>(
         }
     }
     outcomes
+}
+
+/// What a download-folder clean found (and, unless dry-run, removed):
+/// folders of repos no longer in the catalogue, and `.part` files no
+/// live queue job owns.
+#[derive(Debug, Default)]
+pub struct CleanReport {
+    pub stale_folders: Vec<PathBuf>,
+    pub orphan_parts: Vec<PathBuf>,
+    pub bytes: u64,
+}
+
+fn tree_bytes(path: &Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if let Ok(md) = std::fs::metadata(&p) {
+            if md.is_dir() {
+                if let Ok(rd) = std::fs::read_dir(&p) {
+                    for e in rd.flatten() {
+                        stack.push(e.path());
+                    }
+                }
+            } else {
+                total += md.len();
+            }
+        }
+    }
+    total
+}
+
+/// Scan the download root without deleting anything.
+pub fn scan_downloads(root: &Path, cat: &Catalog, queue: &Queue) -> CleanReport {
+    let mut report = CleanReport::default();
+    if !root.exists() {
+        return report;
+    }
+    let expected: std::collections::HashSet<String> = cat
+        .entries
+        .iter()
+        .map(|e| format!("{}-{}", e.repo.owner, e.repo.name))
+        .collect();
+    // Live jobs by (folder, tag, part-file-name): their .part files are
+    // resume state, not orphans.
+    let live: std::collections::HashSet<(String, String, String)> = queue
+        .jobs
+        .iter()
+        .filter(|j| {
+            matches!(
+                j.status,
+                JobStatus::Queued | JobStatus::Paused | JobStatus::Downloading
+            )
+        })
+        .map(|j| {
+            (
+                format!("{}-{}", j.repo.owner, j.repo.name),
+                j.tag.clone(),
+                format!("{}.part", j.asset_name),
+            )
+        })
+        .collect();
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return report;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue; // stray files at the root are the user's, not ours
+        }
+        let folder = entry.file_name().to_string_lossy().to_string();
+        if !expected.contains(&folder) {
+            report.bytes += tree_bytes(&path);
+            report.stale_folders.push(path);
+            continue;
+        }
+        // Inside a live folder: .part files with no owning job are dead.
+        let mut stack = vec![path.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd2) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e2 in rd2.flatten() {
+                let p2 = e2.path();
+                if e2.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    stack.push(p2);
+                    continue;
+                }
+                let name = e2.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".part") {
+                    continue;
+                }
+                let tag = dir
+                    .file_name()
+                    .map(|t| t.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !live.contains(&(folder.clone(), tag, name)) {
+                    report.bytes += e2.metadata().map(|m| m.len()).unwrap_or(0);
+                    report.orphan_parts.push(p2);
+                }
+            }
+        }
+    }
+    report.stale_folders.sort();
+    report.orphan_parts.sort();
+    report
+}
+
+/// Scan, then delete what the scan found (unless `dry_run`). Only ever
+/// touches paths the scan produced, all inside the download root.
+pub fn clean_downloads(
+    root: &Path,
+    cat: &Catalog,
+    queue: &Queue,
+    dry_run: bool,
+) -> Result<CleanReport, String> {
+    let report = scan_downloads(root, cat, queue);
+    if dry_run {
+        return Ok(report);
+    }
+    for folder in &report.stale_folders {
+        std::fs::remove_dir_all(folder).map_err(|e| format!("remove {}: {e}", folder.display()))?;
+    }
+    for part in &report.orphan_parts {
+        std::fs::remove_file(part).map_err(|e| format!("remove {}: {e}", part.display()))?;
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -527,6 +696,58 @@ mod tests {
             calls[0].1,
             "the engine must ask the transport to resume when a .part exists"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn asset_names_must_be_plain_file_names() {
+        assert!(validate_asset_name("app-v1-x64.zip").is_ok());
+        assert!(validate_asset_name("..\\evil.exe").is_err());
+        assert!(validate_asset_name("../evil.exe").is_err());
+        assert!(validate_asset_name("a/b.zip").is_err());
+        assert!(validate_asset_name("C:evil.exe").is_err());
+        assert!(validate_asset_name("").is_err());
+    }
+
+    #[test]
+    fn clean_finds_stale_folders_and_orphan_parts() {
+        let root = temp_root("clean");
+        let mut cat = Catalog::default();
+        cat.add(RepoRef::parse("o/r").unwrap());
+        let live_dir = root.join("o-r").join("v1");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        std::fs::write(live_dir.join("app.zip"), b"done").unwrap();
+        std::fs::write(live_dir.join("dead.zip.part"), b"orphan").unwrap();
+        std::fs::write(live_dir.join("live.zip.part"), b"resume").unwrap();
+        let stale_dir = root.join("gone-repo").join("v9");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(stale_dir.join("old.zip"), b"stale").unwrap();
+
+        let mut queue = Queue::default();
+        queue.enqueue(
+            RepoRef::parse("o/r").unwrap(),
+            "v1",
+            "live.zip",
+            "https://github.com/o/r/releases/download/v1/live.zip",
+        );
+
+        let scan = scan_downloads(&root, &cat, &queue);
+        assert_eq!(scan.stale_folders.len(), 1);
+        assert_eq!(scan.orphan_parts.len(), 1);
+        assert!(scan.bytes > 0);
+
+        // Dry run changes nothing.
+        let dry = clean_downloads(&root, &cat, &queue, true).unwrap();
+        assert_eq!(dry.stale_folders.len(), 1);
+        assert!(root.join("gone-repo").exists());
+        assert!(live_dir.join("dead.zip.part").exists());
+
+        // The real clean removes exactly the scan's findings.
+        clean_downloads(&root, &cat, &queue, false).unwrap();
+        assert!(!root.join("gone-repo").exists());
+        assert!(!live_dir.join("dead.zip.part").exists());
+        assert!(live_dir.join("live.zip.part").exists(), "resume state kept");
+        assert!(live_dir.join("app.zip").exists(), "finished download kept");
         let _ = std::fs::remove_dir_all(&root);
     }
 
