@@ -330,6 +330,14 @@ impl ViewConfig {
 pub struct Settings {
     pub view: ViewConfig,
     pub saved_searches: BTreeMap<String, String>,
+    /// Where downloads land (a folder per volume, a subfolder per tag).
+    pub download_dir: String,
+    /// How many downloads run at once (the Librarian's setting).
+    pub concurrency: u32,
+    /// Librarian schedule: seconds between Atom release checks.
+    pub atom_poll_secs: u64,
+    /// Librarian schedule: seconds between metadata refreshes.
+    pub metadata_poll_secs: u64,
 }
 
 impl Default for Settings {
@@ -337,6 +345,10 @@ impl Default for Settings {
         Settings {
             view: ViewConfig::default(),
             saved_searches: BTreeMap::new(),
+            download_dir: "downloads".to_string(),
+            concurrency: 3,
+            atom_poll_secs: 21_600,
+            metadata_poll_secs: 86_400,
         }
     }
 }
@@ -358,6 +370,16 @@ impl Settings {
                         .collect(),
                 ),
             ),
+            ("download_dir".into(), Json::Str(self.download_dir.clone())),
+            ("concurrency".into(), Json::Num(self.concurrency as f64)),
+            (
+                "atom_poll_secs".into(),
+                Json::Num(self.atom_poll_secs as f64),
+            ),
+            (
+                "metadata_poll_secs".into(),
+                Json::Num(self.metadata_poll_secs as f64),
+            ),
         ])
     }
     pub fn from_json(v: &Json) -> Result<Settings, String> {
@@ -377,6 +399,26 @@ impl Settings {
                 if let Some(q) = val.as_str() {
                     s.saved_searches.insert(k.clone(), q.to_string());
                 }
+            }
+        }
+        if let Some(d) = v.get("download_dir").and_then(Json::as_str) {
+            if !d.is_empty() {
+                s.download_dir = d.to_string();
+            }
+        }
+        if let Some(n) = v.get("concurrency").and_then(Json::as_f64) {
+            if n >= 1.0 {
+                s.concurrency = n as u32;
+            }
+        }
+        if let Some(n) = v.get("atom_poll_secs").and_then(Json::as_f64) {
+            if n >= 60.0 {
+                s.atom_poll_secs = n as u64;
+            }
+        }
+        if let Some(n) = v.get("metadata_poll_secs").and_then(Json::as_f64) {
+            if n >= 60.0 {
+                s.metadata_poll_secs = n as u64;
             }
         }
         Ok(s)

@@ -1,6 +1,9 @@
 # Changelog
 
 ## 0.1.0 — Unreleased
+- Download slice: release asset listing, download engine with Range resume and SHA-256
+  verification against published digests, persisted acquisitions queue, per-volume asset
+  rules, standing-order flags, Librarian settings (download folder, concurrency, polls).
 - Network + search/view slice: live Atom release checks (zero quota), policy-governed metadata
   refresh with quota reporting, rich search language with saved searches, switchable
   layouts/themes/density/grouping/columns, bulk import with preview counts, case-insensitive

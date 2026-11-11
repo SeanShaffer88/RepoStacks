@@ -62,5 +62,14 @@ store sits behind the `Catalog` type so the swap touches one module.
   components (e.g. BurntSushi/ripgrep also releases its `ignore` crate) surfaces the
   newest component release in its Atom feed. The book-page detail's release history is
   where a user picks the release they actually track.
+- 2026-11-10 — Downloads land via a `.part` file in the volume's own folder and are
+  renamed into place only after SHA-256 verification against the digest GitHub
+  publishes for the asset; a mismatch deletes the bytes and fails the job with the
+  reason. A `.part` left by an interrupted run is resumed (HTTP Range), and a job
+  found mid-download on load requeues — crash recovery falls out of the state
+  machine instead of being a special case.
+- 2026-11-10 — The engine runs jobs on scoped threads (bounded by the concurrency
+  setting) from immutable job snapshots and applies outcomes serially, so the
+  queue and catalogue never need locks.
 - 2026-11-10 — Download-only by default; post-download execution is a
   per-repo explicit opt-in, never automatic.

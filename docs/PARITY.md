@@ -15,7 +15,10 @@
 | Saved searches | yes | yes | — | view settings tests + CLI smoke |
 | Layouts / themes / density / grouping / columns | yes | yes | — | view tests (render per layout) |
 | Bulk import with preview | yes | yes | — | catalog import tests + CLI smoke |
-| Download engine (Range, resume, checksum) | no | no | — | download slice, not started |
+| Download engine (Range, resume, checksum) | yes | yes | — | download tests + live verified download 2026-11-10 |
+| Release asset listing + per-volume rules | yes | yes | — | net/download tests + live run |
+| Queue persistence | yes | yes | — | queue round-trip tests |
+| Standing orders (flag) | yes | yes | — | catalog field + CLI |
 | Token storage (DPAPI) | no | no | — | lands with token setting |
 | Window (Tauri) | no | no | no | dark ledger approved; owner's screen concepts on file |
 | Installer + portable release | no | no | no | first release slice |

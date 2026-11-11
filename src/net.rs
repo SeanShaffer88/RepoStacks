@@ -215,6 +215,22 @@ mod tests {
     }
 
     #[test]
+    fn release_assets_parse_with_digest() {
+        let body = r#"{"tag_name":"v1","assets":[{"name":"app-win.zip","browser_download_url":"https://example.com/app-win.zip","size":1234,"digest":"sha256:beef"},{"name":"","browser_download_url":"x"}]}"#;
+        let fake = Fake::new(vec![FetchResponse {
+            status: 200,
+            etag: String::new(),
+            body: body.into(),
+        }]);
+        let repo = RepoRef::parse("o/r").unwrap();
+        let (assets, spent) = fetch_release_assets(&fake, &repo, "v1", None).unwrap();
+        assert_eq!(spent, 1);
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].name, "app-win.zip");
+        assert_eq!(assets[0].digest, "sha256:beef");
+    }
+
+    #[test]
     fn anonymous_304_costs_quota_but_token_304_does_not() {
         for (auth, expected) in [(Auth::Anonymous, 1), (Auth::Token, 0)] {
             let fake = Fake::new(vec![FetchResponse {
@@ -234,4 +250,67 @@ mod tests {
             );
         }
     }
+}
+
+/// One downloadable file on a release, as the REST API describes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    /// `sha256:<hex>` when GitHub publishes a digest for the asset.
+    pub digest: String,
+}
+
+/// Fetch a release's asset list — the one REST call a new release costs.
+/// Returns the assets and the quota spent (1).
+pub fn fetch_release_assets<F: Fetcher>(
+    fetcher: &F,
+    repo: &crate::repo_ref::RepoRef,
+    tag: &str,
+    token: Option<&str>,
+) -> Result<(Vec<ReleaseAsset>, u32), String> {
+    let resp = fetcher.get(&repo.api_release_by_tag_url(tag), None, token)?;
+    match resp.status {
+        200 => {}
+        404 => return Err(format!("{repo} has no release tagged {tag}")),
+        403 | 429 => {
+            return Err(
+                "GitHub rate limit reached — try again after the hour resets, or add a token"
+                    .into(),
+            )
+        }
+        other => return Err(format!("release {tag} for {repo} answered HTTP {other}")),
+    }
+    let v =
+        json::parse(&resp.body).map_err(|e| format!("release for {repo} did not parse: {e}"))?;
+    let mut assets = Vec::new();
+    if let Some(json::Json::Arr(items)) = v.get("assets") {
+        for a in items {
+            let name = a
+                .get("name")
+                .and_then(json::Json::as_str)
+                .unwrap_or("")
+                .to_string();
+            let url = a
+                .get("browser_download_url")
+                .and_then(json::Json::as_str)
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() || url.is_empty() {
+                continue;
+            }
+            assets.push(ReleaseAsset {
+                name,
+                url,
+                size: a.get("size").and_then(json::Json::as_f64).unwrap_or(0.0) as u64,
+                digest: a
+                    .get("digest")
+                    .and_then(json::Json::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+    }
+    Ok((assets, 1))
 }

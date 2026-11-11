@@ -4,6 +4,7 @@
 pub mod atom;
 pub mod cache_policy;
 pub mod catalog;
+pub mod download;
 pub mod glob_match;
 pub mod http;
 pub mod json;
@@ -11,6 +12,7 @@ pub mod net;
 pub mod queue;
 pub mod repo_ref;
 pub mod search;
+pub mod sha256;
 pub mod view;
 
 pub use atom::{parse_releases_atom, ReleaseNote};

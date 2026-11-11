@@ -7,9 +7,12 @@
 use repostacks_core::atom::parse_releases_atom;
 use repostacks_core::cache_policy::CachePolicy;
 use repostacks_core::catalog::Catalog;
+use repostacks_core::download::{enqueue_download, run_pending};
 use repostacks_core::glob_match::select_assets;
-use repostacks_core::http::CurlFetcher;
+use repostacks_core::http::{CurlDownloader, CurlFetcher};
+use repostacks_core::net::fetch_release_assets;
 use repostacks_core::net::{auth_for_token, check_releases, refresh_metadata, RefreshOutcome};
+use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
 use repostacks_core::view::{render, Column, Density, GroupBy, Layout, Settings, Theme};
 use repostacks_core::RepoRef;
@@ -27,6 +30,13 @@ fn token() -> Option<String> {
     std::env::var("REPOSTACKS_TOKEN")
         .ok()
         .filter(|t| !t.is_empty())
+}
+
+fn queue_path() -> PathBuf {
+    match std::env::var_os("REPOSTACKS_QUEUE") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from("data").join("queue.json"),
+    }
 }
 
 fn settings_path() -> PathBuf {
@@ -532,6 +542,357 @@ fn run(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
+        "assets" => {
+            // The asset list of a release: one REST call, reported honestly.
+            let repo =
+                RepoRef::parse(need(args, 1, "assets <owner/repo> [tag]")?).map_err(|e| e.0)?;
+            let cat = Catalog::load(&path)?;
+            let entry = cat
+                .get(&repo)
+                .ok_or_else(|| format!("{repo} is not in the catalogue"))?;
+            let tag = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(|| entry.latest_tag.clone());
+            if tag.is_empty() {
+                return Err(format!(
+                    "no tag known for {repo} — run `check {repo}` first or pass a tag"
+                ));
+            }
+            let fetcher = CurlFetcher::default();
+            let tok = token();
+            let (assets, spent) = fetch_release_assets(&fetcher, &repo, &tag, tok.as_deref())?;
+            println!("{repo} {tag}: {} asset(s)", assets.len());
+            for a in &assets {
+                println!(
+                    "  {}  ({} bytes){}",
+                    a.name,
+                    a.size,
+                    if a.digest.is_empty() {
+                        ""
+                    } else {
+                        "  [sha256 published]"
+                    }
+                );
+            }
+            println!("API quota spent: {spent}.");
+            Ok(())
+        }
+        "rules" => {
+            // Per-volume asset rules: show with no patterns, set with them.
+            let repo =
+                RepoRef::parse(need(args, 1, "rules <owner/repo> [glob...]")?).map_err(|e| e.0)?;
+            let mut cat = Catalog::load(&path)?;
+            if args.len() > 2 {
+                let patterns: Vec<String> = args[2..].to_vec();
+                let entry = cat
+                    .get_mut(&repo)
+                    .ok_or_else(|| format!("{repo} is not in the catalogue"))?;
+                entry.asset_patterns = patterns;
+                cat.save(&path)
+                    .map_err(|e| format!("save catalogue: {e}"))?;
+                println!("{repo}: asset rules set.");
+            }
+            let entry = cat
+                .get(&repo)
+                .ok_or_else(|| format!("{repo} is not in the catalogue"))?;
+            if entry.asset_patterns.is_empty() {
+                println!("{repo}: no rules — the Windows-first default pick applies.");
+            } else {
+                println!("{repo} rules:");
+                for pat in &entry.asset_patterns {
+                    println!("  {pat}");
+                }
+            }
+            Ok(())
+        }
+        "auto" => {
+            // Standing order: auto-download new releases when the Librarian runs.
+            let repo =
+                RepoRef::parse(need(args, 1, "auto <owner/repo> <on|off>")?).map_err(|e| e.0)?;
+            let on = match need(args, 2, "auto <owner/repo> <on|off>")? {
+                "on" | "true" | "yes" => true,
+                "off" | "false" | "no" => false,
+                other => return Err(format!("expected on or off, got '{other}'")),
+            };
+            let mut cat = Catalog::load(&path)?;
+            let entry = cat
+                .get_mut(&repo)
+                .ok_or_else(|| format!("{repo} is not in the catalogue"))?;
+            entry.auto_download = on;
+            cat.save(&path)
+                .map_err(|e| format!("save catalogue: {e}"))?;
+            println!("{repo}: standing order {}.", if on { "ON" } else { "OFF" });
+            Ok(())
+        }
+        "download" => {
+            let repo =
+                RepoRef::parse(need(args, 1, "download <owner/repo> [tag]")?).map_err(|e| e.0)?;
+            let settings = Settings::load(&settings_path())?;
+            let root = PathBuf::from(&settings.download_dir);
+            let mut cat = Catalog::load(&path)?;
+            let tag = match args.get(2) {
+                Some(t) => t.clone(),
+                None => {
+                    let entry = cat
+                        .get(&repo)
+                        .ok_or_else(|| format!("{repo} is not in the catalogue"))?;
+                    if entry.latest_tag.is_empty() {
+                        return Err(format!(
+                            "no tag known for {repo} — run `check {repo}` first"
+                        ));
+                    }
+                    entry.latest_tag.clone()
+                }
+            };
+            if cat.get(&repo).is_none() {
+                return Err(format!("{repo} is not in the catalogue"));
+            }
+            let fetcher = CurlFetcher::default();
+            let tok = token();
+            let (assets, spent) = fetch_release_assets(&fetcher, &repo, &tag, tok.as_deref())?;
+            let entry = cat.get(&repo).expect("checked").clone();
+            let mut queue = Queue::load(&queue_path())?;
+            let id = enqueue_download(&mut queue, &entry, &tag, &assets, &root)?;
+            println!(
+                "Queued job {id}: {repo} {tag} (assets fetched, quota {spent}).",
+                repo = entry.repo
+            );
+            let downloader = CurlDownloader::default();
+            let outcomes = run_pending(
+                &mut queue,
+                &mut cat,
+                &downloader,
+                &root,
+                tok.as_deref(),
+                settings.concurrency as usize,
+            );
+            queue
+                .save(&queue_path())
+                .map_err(|e| format!("save queue: {e}"))?;
+            cat.save(&path)
+                .map_err(|e| format!("save catalogue: {e}"))?;
+            match outcomes.first() {
+                Some(o) if o.status == JobStatus::Done => {
+                    println!("Downloaded to {}", o.final_path.display());
+                    Ok(())
+                }
+                Some(o) => Err(format!("download failed: {}", o.error)),
+                None => Err("nothing ran".into()),
+            }
+        }
+        "update" => {
+            // Check (Atom, free) then download the newer release (1 call).
+            let repo = RepoRef::parse(need(args, 1, "update <owner/repo>")?).map_err(|e| e.0)?;
+            let mut cat = Catalog::load(&path)?;
+            if cat.get(&repo).is_none() {
+                return Err(format!("{repo} is not in the catalogue"));
+            }
+            let fetcher = CurlFetcher::default();
+            let now = now_unix();
+            let (latest, installed) = {
+                let entry = cat.get_mut(&repo).expect("checked");
+                let out = check_releases(&fetcher, entry, now)?;
+                (out.latest_tag, entry.installed_tag.clone())
+            };
+            cat.save(&path)
+                .map_err(|e| format!("save catalogue: {e}"))?;
+            if latest.is_empty() {
+                println!("{repo}: no releases.");
+                return Ok(());
+            }
+            if latest == installed {
+                println!("{repo}: {latest} already installed.");
+                return Ok(());
+            }
+            println!(
+                "{repo}: {latest} available (installed: {}). Downloading…",
+                if installed.is_empty() {
+                    "none".into()
+                } else {
+                    installed
+                }
+            );
+            // Reuse the download path with an explicit tag.
+            let sub: Vec<String> = vec!["download".into(), repo.full_name(), latest];
+            run(&sub)
+        }
+        "update-all" => {
+            let mut cat = Catalog::load(&path)?;
+            let fetcher = CurlFetcher::default();
+            let now = now_unix();
+            let repos: Vec<RepoRef> = cat.entries.iter().map(|e| e.repo.clone()).collect();
+            let mut todo: Vec<RepoRef> = Vec::new();
+            for repo in repos {
+                let entry = cat.get_mut(&repo).expect("listed");
+                match check_releases(&fetcher, entry, now) {
+                    Ok(out) => {
+                        if !out.latest_tag.is_empty() && out.latest_tag != entry.installed_tag {
+                            println!("{repo}: {} available.", out.latest_tag);
+                            todo.push(repo.clone());
+                        } else {
+                            println!("{repo}: up to date.");
+                        }
+                    }
+                    Err(msg) => println!("{repo}: {msg}"),
+                }
+            }
+            cat.save(&path)
+                .map_err(|e| format!("save catalogue: {e}"))?;
+            let mut failed = 0;
+            for repo in todo {
+                let sub: Vec<String> = vec!["download".into(), repo.full_name()];
+                if run(&sub).is_err() {
+                    failed += 1;
+                }
+            }
+            if failed > 0 {
+                Err(format!("{failed} update(s) failed"))
+            } else {
+                Ok(())
+            }
+        }
+        "queue" => {
+            let qpath = queue_path();
+            let mut queue = Queue::load(&qpath)?;
+            match args.get(1).map(String::as_str) {
+                None | Some("list") => {
+                    if queue.jobs.is_empty() {
+                        println!("The acquisitions queue is empty.");
+                    }
+                    for j in &queue.jobs {
+                        println!(
+                            "#{id} {repo} {tag} · {asset} · {status} · {done}/{total} bytes{err}",
+                            id = j.id,
+                            repo = j.repo,
+                            tag = j.tag,
+                            asset = j.asset_name,
+                            status = j.status.label(),
+                            done = j.bytes_done,
+                            total = j.bytes_total,
+                            err = if j.error.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {}", j.error)
+                            }
+                        );
+                    }
+                    Ok(())
+                }
+                Some("run") => {
+                    let settings = Settings::load(&settings_path())?;
+                    let root = PathBuf::from(&settings.download_dir);
+                    let mut cat = Catalog::load(&path)?;
+                    let downloader = CurlDownloader::default();
+                    let tok = token();
+                    let outcomes = run_pending(
+                        &mut queue,
+                        &mut cat,
+                        &downloader,
+                        &root,
+                        tok.as_deref(),
+                        settings.concurrency as usize,
+                    );
+                    queue.save(&qpath).map_err(|e| format!("save queue: {e}"))?;
+                    cat.save(&path)
+                        .map_err(|e| format!("save catalogue: {e}"))?;
+                    let failed = outcomes
+                        .iter()
+                        .filter(|o| o.status == JobStatus::Failed)
+                        .count();
+                    println!("Ran {} job(s); {} failed.", outcomes.len(), failed);
+                    if failed > 0 {
+                        Err("some downloads failed — see queue list".into())
+                    } else {
+                        Ok(())
+                    }
+                }
+                Some("pause") | Some("resume") | Some("cancel") => {
+                    let verb = args[1].clone();
+                    let id: u64 = need(args, 2, "queue <pause|resume|cancel> <id>")?
+                        .parse()
+                        .map_err(|_| "job id must be a number".to_string())?;
+                    let ok = match verb.as_str() {
+                        "pause" => queue.pause(id),
+                        "resume" => queue.resume(id),
+                        _ => queue.cancel(id),
+                    };
+                    if ok {
+                        queue.save(&qpath).map_err(|e| format!("save queue: {e}"))?;
+                        println!("Job {id}: {verb} applied.");
+                        Ok(())
+                    } else {
+                        Err(format!("job {id} cannot {verb} from its current state"))
+                    }
+                }
+                Some("clear") => {
+                    let n = queue.clear_finished();
+                    queue.save(&qpath).map_err(|e| format!("save queue: {e}"))?;
+                    println!("Cleared {n} finished job(s).");
+                    Ok(())
+                }
+                Some(other) => Err(format!(
+                    "unknown queue action '{other}' (list, run, pause, resume, cancel, clear)"
+                )),
+            }
+        }
+        "config" => {
+            let spath = settings_path();
+            let mut settings = Settings::load(&spath)?;
+            match args.get(1).map(String::as_str) {
+                None => {
+                    println!("download-dir: {}", settings.download_dir);
+                    println!("concurrency:  {}", settings.concurrency);
+                    println!("atom-poll:    {}s", settings.atom_poll_secs);
+                    println!("metadata-poll: {}s", settings.metadata_poll_secs);
+                    Ok(())
+                }
+                Some("download-dir") => {
+                    settings.download_dir =
+                        need(args, 2, "config download-dir <path>")?.to_string();
+                    settings
+                        .save(&spath)
+                        .map_err(|e| format!("save settings: {e}"))?;
+                    println!("download-dir: {}", settings.download_dir);
+                    Ok(())
+                }
+                Some("concurrency") => {
+                    let n: u32 = need(args, 2, "config concurrency <n>")?
+                        .parse()
+                        .map_err(|_| "concurrency must be a number".to_string())?;
+                    if n == 0 {
+                        return Err("concurrency must be at least 1".into());
+                    }
+                    settings.concurrency = n;
+                    settings
+                        .save(&spath)
+                        .map_err(|e| format!("save settings: {e}"))?;
+                    println!("concurrency: {}", settings.concurrency);
+                    Ok(())
+                }
+                Some("poll") => {
+                    let atom: u64 = need(args, 2, "config poll <atom-secs> <metadata-secs>")?
+                        .parse()
+                        .map_err(|_| "poll seconds must be a number".to_string())?;
+                    let meta: u64 = need(args, 3, "config poll <atom-secs> <metadata-secs>")?
+                        .parse()
+                        .map_err(|_| "poll seconds must be a number".to_string())?;
+                    if atom < 60 || meta < 60 {
+                        return Err("poll intervals must be at least 60 seconds".into());
+                    }
+                    settings.atom_poll_secs = atom;
+                    settings.metadata_poll_secs = meta;
+                    settings
+                        .save(&spath)
+                        .map_err(|e| format!("save settings: {e}"))?;
+                    println!("atom-poll: {atom}s · metadata-poll: {meta}s");
+                    Ok(())
+                }
+                Some(other) => Err(format!(
+                    "unknown config key '{other}' (download-dir, concurrency, poll)"
+                )),
+            }
+        }
         "updates" => {
             let cat = Catalog::load(&path)?;
             let ups = cat.updates_available();
@@ -575,6 +936,14 @@ fn print_help() {
          check-all                 Live release check for the whole catalogue\n  \
          refresh <repo|--all> [--force]  Refresh metadata under the cache policy\n  \
          match <glob> <asset>...   Test an asset-selection rule\n  \
+         assets <repo> [tag]       List a release's downloadable assets (1 API call)\n  \
+         rules <repo> [glob...]    Show or set a volume's asset-selection rules\n  \
+         auto <repo> <on|off>      Standing order: auto-download new releases\n  \
+         download <repo> [tag]     Download a release now (queue + engine)\n  \
+         update <repo>             Check (free) and download if newer\n  \
+         update-all                Check everything and download what's newer\n  \
+         queue [list|run|pause|resume|cancel|clear]  The acquisitions queue\n  \
+         config [download-dir|concurrency|poll]  Librarian settings\n  \
          updates                   Installed volumes with a newer release\n  \
          version                   Print the version\n"
     );

@@ -85,6 +85,13 @@ impl RepoRef {
         format!("{}/{}", self.owner, self.name)
     }
 
+    pub fn api_release_by_tag_url(&self, tag: &str) -> String {
+        format!(
+            "https://api.github.com/repos/{}/{}/releases/tags/{}",
+            self.owner, self.name, tag
+        )
+    }
+
     pub fn releases_atom_url(&self) -> String {
         format!(
             "https://github.com/{}/{}/releases.atom",
