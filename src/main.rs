@@ -1450,6 +1450,69 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        "bench" => {
+            // Performance evidence: time the core operations over a
+            // synthetic catalogue. No network, and no contact with the
+            // real catalogue — the scratch catalogue lives in a temp
+            // folder and is removed afterwards.
+            let mut repos = 5000usize;
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "--repos" {
+                    if let Some(v) = args.get(i + 1) {
+                        repos = v
+                            .parse()
+                            .map_err(|_| "--repos needs a number".to_string())?;
+                    }
+                }
+                i += 1;
+            }
+            let dir = std::env::temp_dir().join(format!("repostacks-bench-{}", std::process::id()));
+            let report = repostacks_core::bench::run_bench(repos, &dir)?;
+            let _ = std::fs::remove_dir_all(&dir);
+            if json_mode {
+                let scenarios = Json::Arr(
+                    report
+                        .scenarios
+                        .iter()
+                        .map(|s| {
+                            Json::Obj(vec![
+                                ("name".into(), Json::Str(s.name.clone())),
+                                ("detail".into(), Json::Str(s.detail.clone())),
+                                ("iterations".into(), Json::Num(s.iterations as f64)),
+                                ("median_ms".into(), Json::Num(s.median_ms)),
+                                ("min_ms".into(), Json::Num(s.min_ms)),
+                            ])
+                        })
+                        .collect(),
+                );
+                println!(
+                    "{}",
+                    Json::Obj(vec![
+                        ("repos".into(), Json::Num(report.repos as f64)),
+                        (
+                            "catalog_bytes".into(),
+                            Json::Num(report.catalog_bytes as f64)
+                        ),
+                        ("scenarios".into(), scenarios),
+                    ])
+                    .to_string_pretty()
+                );
+            } else {
+                println!(
+                    "RepoStacks bench - synthetic catalogue of {} volumes ({} KB on disk)",
+                    report.repos,
+                    report.catalog_bytes / 1024
+                );
+                for s in &report.scenarios {
+                    println!(
+                        "  {:<18} {:<52} median {:>9.2} ms   min {:>9.2} ms",
+                        s.name, s.detail, s.median_ms, s.min_ms
+                    );
+                }
+            }
+            Ok(())
+        }
         "doctor" => {
             // Plain-language health check: state files readable, data
             // folder writable, curl present. Exit code fails if any check
@@ -1602,6 +1665,7 @@ fn print_help() {
          config [download-dir|concurrency|poll]  Librarian settings\n  \
          updates                   Installed volumes with a newer release\n  \
          usage                     API calls RepoStacks has counted, by purpose and period\n  \
+         bench [--repos N]         Time the core operations over a synthetic catalogue (default 5000 volumes)\n  \
          doctor                    Health check: state files, data folder, curl\n  \
          --json                    With list/find/updates/facets/queue list: JSON output\n  \
          version                   Print the version\n"
