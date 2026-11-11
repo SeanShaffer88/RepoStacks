@@ -140,6 +140,7 @@ td.num, th.num { font-family: var(--mono); text-align: right; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
 .panel h3 { margin-top: 0; }
 .panel label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; color: var(--muted); font-size: 13px; }
+.panel label.check { flex-direction: row; align-items: center; gap: 8px; }
 .panel label input { color: var(--text); }
 .release-row, .asset-row, .queue-row {
   display: flex; gap: 10px; align-items: center; padding: 6px 4px; border-bottom: 1px solid var(--border);

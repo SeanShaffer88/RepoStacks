@@ -33,10 +33,10 @@ your computer — all without needing a GitHub account.
 
 v0.2.0: the core library, command line, live network fetching, download engine,
 and the window are built, with corruption-proof state files, parallel release
-checks, retryable downloads, and an explainable auto-pick. Windows runtime
-behaviour is unverified until it runs on a real Windows machine — the first
-field pass decides what gets polished next. Screenshots will be added from a
-real run.
+checks, retryable downloads, and an explainable auto-pick. The window has run
+on a real Windows machine (2026-11-11): the catalogue and volume detail
+screens render as designed — see Screenshots. Still unverified in the field:
+the installer, token storage, downloads from the window, and the Librarian.
 
 ## Command line
 
@@ -80,8 +80,17 @@ cargo build --release
 
 ## Screenshots
 
-Captures will be added from real runs on Windows once the window exists —
-none are shown yet because there is no window to capture.
+Real runs on Windows (v0.2.0, 2026-11-11):
+
+The catalogue on first launch — an empty library, the filter panel (language,
+topic, license, status), and the sort control:
+
+![Catalogue — empty library](docs/images/catalogue.png)
+
+A volume's book page — shelves, the standing-order toggle, per-volume asset
+rules, release history, and the release's downloadable assets:
+
+![Volume detail](docs/images/detail.png)
 
 ## License
 

@@ -311,7 +311,7 @@ async function openDetail(fullName) {
         <div class="chips" id="detail-shelves"></div>
         <div class="row"><input id="detail-shelf-input" placeholder="Shelf name"> <button id="detail-shelf-add">Add to shelf</button></div>
         <h3>Standing order</h3>
-        <label><input type="checkbox" id="detail-auto" ${e.auto_download ? "checked" : ""}> Auto-download new releases (the Librarian)</label>
+        <label class="check"><input type="checkbox" id="detail-auto" ${e.auto_download ? "checked" : ""}> Auto-download new releases (the Librarian)</label>
       </div>
       <div class="panel">
         <h3>Asset rules (auto-download pick)</h3>
