@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark-ledger" data-density="comfortable">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RepoStacks — The Stacks</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">📚 The Stacks</div>
+  <nav id="main-nav">
+    <button data-screen="catalogue" class="active">Catalogue</button>
+    <button data-screen="shelves">Shelves</button>
+    <button data-screen="myshelf">My Shelf</button>
+    <button data-screen="acquisitions">Acquisitions</button>
+    <button data-screen="librarian">Librarian</button>
+  </nav>
+  <input id="global-search" type="search" placeholder="Search the catalogue…  try  lang:rust stars:&gt;1000 has:update">
+  <button id="add-btn" class="primary">+ Add volumes</button>
+</header>
+
+<main>
+  <!-- Catalogue -->
+  <section id="screen-catalogue" class="screen">
+    <aside id="facet-panel">
+      <div class="facet-head">Filters <button id="clear-filters" class="small">Clear all</button></div>
+      <h4>Language</h4>
+      <div id="facet-languages" class="facet-list"></div>
+      <h4>Topic</h4>
+      <div id="facet-topics" class="facet-list"></div>
+      <h4>Status</h4>
+      <div class="facet-list" id="facet-status">
+        <label><input type="checkbox" data-status="is:installed"> Installed</label>
+        <label><input type="checkbox" data-status="has:update"> Update available</label>
+        <label><input type="checkbox" data-status="is:missing"> Not installed</label>
+        <label><input type="checkbox" data-status="has:auto"> Standing orders</label>
+      </div>
+      <h4>View</h4>
+      <label class="view-row">Layout
+        <select id="view-layout">
+          <option value="ledger">Ledger (table)</option>
+          <option value="cards">Cards (covers)</option>
+          <option value="compact">Compact list</option>
+          <option value="diagram">Diagram (by shelf)</option>
+        </select>
+      </label>
+      <label class="view-row">Theme
+        <select id="view-theme">
+          <option value="dark-ledger">Dark ledger</option>
+          <option value="paper-ledger">Paper ledger</option>
+          <option value="clean-sheet">Clean sheet</option>
+          <option value="terminal">Terminal</option>
+        </select>
+      </label>
+      <label class="view-row">Density
+        <select id="view-density">
+          <option value="comfortable">Comfortable</option>
+          <option value="compact">Compact</option>
+        </select>
+      </label>
+      <label class="view-row">Group by
+        <select id="view-group">
+          <option value="none">Nothing</option>
+          <option value="shelf">Shelf</option>
+          <option value="language">Language</option>
+          <option value="license">License</option>
+          <option value="status">Status</option>
+        </select>
+      </label>
+    </aside>
+    <div id="catalogue-main">
+      <div class="toolbar">
+        <span id="result-count"></span>
+        <span class="spacer"></span>
+        <button id="check-now">Check for releases</button>
+        <button id="refresh-meta">Refresh metadata</button>
+      </div>
+      <div id="entries"></div>
+    </div>
+  </section>
+
+  <!-- Detail (the book page) -->
+  <section id="screen-detail" class="screen hidden"></section>
+
+  <!-- Shelves -->
+  <section id="screen-shelves" class="screen hidden">
+    <div class="screen-head"><h2>Shelves</h2></div>
+    <div id="shelf-list"></div>
+  </section>
+
+  <!-- My Shelf -->
+  <section id="screen-myshelf" class="screen hidden">
+    <div class="screen-head">
+      <h2>My Shelf</h2>
+      <span class="spacer"></span>
+      <button id="update-all" class="primary">Update all</button>
+    </div>
+    <div id="myshelf-body"></div>
+  </section>
+
+  <!-- Acquisitions -->
+  <section id="screen-acquisitions" class="screen hidden">
+    <div class="screen-head">
+      <h2>Acquisitions</h2>
+      <span class="spacer"></span>
+      <button id="queue-run">Run queue</button>
+      <button id="queue-clear">Clear finished</button>
+    </div>
+    <div id="queue-list"></div>
+  </section>
+
+  <!-- Librarian -->
+  <section id="screen-librarian" class="screen hidden">
+    <div class="screen-head"><h2>The Librarian</h2>
+    <span class="spacer"></span>
+    <button id="librarian-now" class="primary">Run a pass now</button></div>
+    <div class="librarian-grid">
+      <div class="panel">
+        <h3>Schedule &amp; downloads</h3>
+        <label>Check for new releases every (minutes)
+          <input id="cfg-atom" type="number" min="1"></label>
+        <label>Refresh metadata every (minutes)
+          <input id="cfg-meta" type="number" min="1"></label>
+        <label>Download concurrency
+          <input id="cfg-conc" type="number" min="1" max="16"></label>
+        <label>Downloads folder (relative to the app, or a full path)
+          <input id="cfg-dir" type="text"></label>
+        <button id="cfg-save">Save settings</button>
+        <p class="note">Release checks ride Atom feeds and cost no API quota.
+        Metadata refresh reports exactly what it spends: 60 requests/hour
+        anonymous, 5,000/hour with a token.</p>
+      </div>
+      <div class="panel">
+        <h3>Personal access token</h3>
+        <p id="token-state" class="note"></p>
+        <label>Token (stored DPAPI-protected, never in plain text)
+          <input id="cfg-token" type="password" placeholder="ghp_…"></label>
+        <div class="row">
+          <button id="token-set">Store token</button>
+          <button id="token-clear">Remove token</button>
+        </div>
+      </div>
+      <div class="panel wide">
+        <h3>Activity</h3>
+        <div id="activity-log"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- Add volumes modal -->
+<div id="add-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head"><h3>Add to the catalogue</h3><button id="add-close">✕</button></div>
+    <label>One volume
+      <input id="add-single" type="text" placeholder="owner/repo or https://github.com/owner/repo"></label>
+    <label>…or paste a list (one per line)
+      <textarea id="add-bulk" rows="7" placeholder="BurntSushi/ripgrep&#10;dandavison/delta&#10;casey/just"></textarea></label>
+    <label>Put them on shelf (optional)
+      <input id="add-shelf" type="text" placeholder="Dev Tools"></label>
+    <div id="add-report"></div>
+    <div class="row end">
+      <button id="add-cancel">Cancel</button>
+      <button id="add-go" class="primary">Add volumes</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -62,6 +62,15 @@ store sits behind the `Catalog` type so the swap touches one module.
   components (e.g. BurntSushi/ripgrep also releases its `ignore` crate) surfaces the
   newest component release in its Atom feed. The book-page detail's release history is
   where a user picks the release they actually track.
+- 2026-11-10 — The window is a separate crate (`window/`) over the core library, built
+  with Tauri's `custom-protocol` feature so the UI ships inside the binary; the
+  installer is a project-owned NSIS script (not the Tauri bundler), which keeps the
+  release shape identical to the house standard: Setup.exe + Portable.zip +
+  SHA256SUMS.txt. The window stores its data beside the executable (`data/`, the
+  portable rule) and honours the CLI's environment overrides.
+- 2026-11-10 — The token is stored only as a DPAPI-protected blob (base64) in the
+  settings file and unprotected in memory on demand; the CLI keeps using the
+  `REPOSTACKS_TOKEN` environment variable. Neither surface ever writes a plain token.
 - 2026-11-10 — Downloads land via a `.part` file in the volume's own folder and are
   renamed into place only after SHA-256 verification against the digest GitHub
   publishes for the asset; a mismatch deletes the bytes and fails the job with the

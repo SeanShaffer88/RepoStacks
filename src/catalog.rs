@@ -234,6 +234,16 @@ impl Catalog {
         true
     }
 
+    pub fn remove_from_shelf(&mut self, shelf: &str, repo: &RepoRef) -> bool {
+        let name = repo.full_name();
+        if let Some((_, members)) = self.shelves.iter_mut().find(|(n, _)| n.as_str() == shelf) {
+            let before = members.len();
+            members.retain(|m| m != &name);
+            return members.len() != before;
+        }
+        false
+    }
+
     pub fn shelf_members(&self, shelf: &str) -> Vec<&RepoEntry> {
         match self.shelves.get(shelf) {
             Some(names) => names

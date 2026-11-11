@@ -338,6 +338,9 @@ pub struct Settings {
     pub atom_poll_secs: u64,
     /// Librarian schedule: seconds between metadata refreshes.
     pub metadata_poll_secs: u64,
+    /// Optional GitHub token, DPAPI-protected and base64-encoded by the
+    /// window. Never a plain token; the CLI uses REPOSTACKS_TOKEN instead.
+    pub token_protected: String,
 }
 
 impl Default for Settings {
@@ -349,6 +352,7 @@ impl Default for Settings {
             concurrency: 3,
             atom_poll_secs: 21_600,
             metadata_poll_secs: 86_400,
+            token_protected: String::new(),
         }
     }
 }
@@ -379,6 +383,10 @@ impl Settings {
             (
                 "metadata_poll_secs".into(),
                 Json::Num(self.metadata_poll_secs as f64),
+            ),
+            (
+                "token_protected".into(),
+                Json::Str(self.token_protected.clone()),
             ),
         ])
     }
@@ -420,6 +428,9 @@ impl Settings {
             if n >= 60.0 {
                 s.metadata_poll_secs = n as u64;
             }
+        }
+        if let Some(tok) = v.get("token_protected").and_then(Json::as_str) {
+            s.token_protected = tok.to_string();
         }
         Ok(s)
     }

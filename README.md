@@ -16,21 +16,25 @@ your computer — all without needing a GitHub account.
 - **Quota-free release watching** — new releases are detected from GitHub's
   public Atom feeds, which do not use the 60-requests-per-hour anonymous API
   limit. See `docs/ARCHITECTURE.md` for the corrected rate-limit design.
-- **Acquisitions queue** — downloads with per-repo asset rules (glob patterns),
-  pause/resume, and checksum fields (engine lands in the download slice).
-- **Standing orders** — per-repo auto-download toggles with an update badge
-  when a newer release than the installed one exists.
+- **Downloads that land verified** — the engine picks the right file by the
+  volume's glob rules or a Windows-first default, resumes interrupted downloads,
+  and checks SHA-256 against the digest GitHub publishes before the file counts
+  as installed. The Acquisitions queue persists across restarts.
+- **The window** — a dark ledger desk for the library: faceted filter sidebar,
+  four switchable layouts (ledger, card covers, compact list, shelf diagram),
+  four themes, book-page volume details, and the Librarian — a built-in
+  scheduler that checks the shelves on your interval and downloads standing
+  orders automatically.
 - **No login required** — everything above works with public data. An optional
   personal access token (stored protected by Windows DPAPI, never in plain
   text) raises the API limit and makes metadata refresh cheaper.
 
 ## Status
 
-Foundation slice: the core library and command line are built and tested.
-The window (Tauri), live network fetching, and the download engine arrive in
-later slices, in that order — the design is approved before window code is
-written. Windows runtime behaviour is unverified until it runs on a real
-Windows machine.
+v0.1.0: the core library, command line, live network fetching, download engine,
+and the window are built. Windows runtime behaviour is unverified until it runs
+on a real Windows machine — the first field pass decides what gets polished
+next. Screenshots will be added from a real run.
 
 ## Command line
 
@@ -46,7 +50,17 @@ repostacks feed-url rust-lang/rust
 repostacks check-feed releases.atom
 repostacks match "*-win64.zip" app-win64.zip app.dmg
 repostacks updates
+repostacks find "lang:rust stars:>10000 sort:stars"
+repostacks check-all
+repostacks refresh --all
+repostacks download casey/just
+repostacks update-all
+repostacks queue list
+repostacks view layout cards
 ```
+
+The window is the same library on a desk: run `RepoStacks.exe`, or build it
+with `cargo build --release --features custom-protocol --manifest-path window/Cargo.toml`.
 
 The catalogue lives in `data/catalog.json` (override with the `REPOSTACKS_DATA`
 environment variable), carries a `schema_version`, and is written atomically

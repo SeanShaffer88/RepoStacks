@@ -40,9 +40,28 @@
 - Per-volume asset rules (`rules`) and standing orders (`auto on|off`).
 - Librarian settings (`config`): download folder, concurrency, Atom/metadata poll intervals.
 
+## Built (window slice)
+- **The window** (Tauri, `window/`): the dark ledger design — catalogue with faceted
+  filter sidebar (live facet counts), four switchable layouts (ledger table, card grid
+  with language-colour covers, compact list, shelf diagram), four themes (dark ledger,
+  paper ledger, clean sheet, terminal), density and group-by controls — all driven by
+  the same saved `ViewConfig` the CLI uses.
+- Screens adapted from the library concepts: Catalogue, Shelves (volumes as spines on
+  planks), My Shelf (updates split from up-to-date, Update all), Acquisitions (queue
+  with progress and pause/resume/cancel), the book-page volume detail (release history,
+  asset list with the auto-pick marked, per-volume asset rules, standing-order toggle),
+  the Add Volumes dialog (single + bulk import with preview report), and the Librarian.
+- **The Librarian**: background scheduler on the saved poll intervals — Atom checks
+  for the whole catalogue, standing-order volumes download new releases automatically,
+  activity log in-app; a pass can also be run on demand.
+- Token storage via DPAPI (Windows), protected at rest, unprotected only in memory;
+  anonymous mode remains the default and fully functional.
+- Post-install steps remain out of scope by design (see ARCHITECTURE): the library
+  downloads and verifies; it never runs anything it fetched.
+
 ## Planned
-- Scheduled Atom polling on a bounded interval (the Librarian) with an activity log and an
-  API-usage meter fed by the cache policy's accounting.
+- API-usage meter fed by the cache policy's accounting on the Librarian screen
+  (spend is already reported per refresh; a standing meter is polish).
 - Tauri window over the core operations, built to the owner's eight screen concepts
   (adapted): catalogue grid with faceted filter sidebar, shelf view, book-page repo
   detail with release history and per-repo asset rules, acquisitions queue, dense table
