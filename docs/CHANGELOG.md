@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-11-11
+- No more flashing command-prompt windows: every background curl call
+  (release checks, metadata refreshes, asset listings, downloads) now runs
+  without a console window attached.
+- Fixed the Standing order checkbox on the volume page stacking above its
+  label instead of sitting beside it.
+
 ## 0.2.0 — 2026-11-10
 - Reliability: state files (catalogue, queue, settings) keep a backup generation;
   a corrupt file is quarantined and the backup restored instead of losing the

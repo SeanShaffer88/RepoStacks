@@ -9,7 +9,7 @@ use repostacks_core::cache_policy::CachePolicy;
 use repostacks_core::catalog::{Catalog, RepoEntry};
 use repostacks_core::download::{enqueue_download, plan_download, run_pending};
 use repostacks_core::glob_match::select_assets;
-use repostacks_core::http::{CurlDownloader, CurlFetcher};
+use repostacks_core::http::{hidden_command, CurlDownloader, CurlFetcher};
 use repostacks_core::json::Json;
 use repostacks_core::net::fetch_release_assets;
 use repostacks_core::net::{
@@ -1097,7 +1097,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 writable,
                 format!("data folder {} is writable", dir.display()),
             );
-            let curl_ok = std::process::Command::new("curl")
+            let curl_ok = hidden_command("curl")
                 .arg("--version")
                 .output()
                 .map(|o| o.status.success())

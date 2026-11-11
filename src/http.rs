@@ -15,6 +15,22 @@ pub struct FetchResponse {
     pub body: String,
 }
 
+/// Build a command that never flashes a console window. The window app
+/// has no console of its own, so on Windows every plain child process
+/// gets a fresh command-prompt window — one per check, refresh, and
+/// download. CREATE_NO_WINDOW suppresses it; elsewhere this is just a
+/// plain command.
+pub fn hidden_command(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 pub trait Fetcher {
     /// GET `url`. `etag` sends `If-None-Match`; `token` sends
     /// `Authorization: Bearer …`. A 304 response is a normal Ok result.
@@ -52,7 +68,7 @@ impl Fetcher for CurlFetcher {
         let dir = std::env::temp_dir();
         let body_path = dir.join(format!("repostacks-body-{stamp}.tmp"));
         let head_path = dir.join(format!("repostacks-head-{stamp}.tmp"));
-        let mut cmd = std::process::Command::new(&self.program);
+        let mut cmd = hidden_command(&self.program);
         cmd.args([
             "-sS",
             "--fail-with-body",
@@ -167,7 +183,7 @@ impl Downloader for CurlDownloader {
         token: Option<&str>,
     ) -> Result<u64, String> {
         let attempt = |resume: bool| -> Result<(), String> {
-            let mut cmd = std::process::Command::new(&self.program);
+            let mut cmd = hidden_command(&self.program);
             cmd.args([
                 "-sS",
                 "-L",
