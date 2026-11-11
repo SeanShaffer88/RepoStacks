@@ -187,6 +187,10 @@ td.num, th.num { font-family: var(--mono); text-align: right; }
   padding: 9px 16px; border-radius: 8px; z-index: 60; max-width: 80vw;
 }
 #toast.error { border-color: var(--danger); }
+fieldset.iu { border: 1px solid var(--border); border-radius: 8px; margin: 14px 0 4px; padding: 10px 12px 12px; }
+fieldset.iu legend { color: var(--muted); padding: 0 6px; font-size: 13px; }
+fieldset.iu .row { flex-wrap: wrap; }
+#iu-report { margin-top: 8px; color: var(--muted); }
 .empty { color: var(--muted); padding: 26px 8px; text-align: center; }
 .empty .primary { margin-top: 10px; }
 .sort-row { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; color: var(--muted); font-size: 13px; }

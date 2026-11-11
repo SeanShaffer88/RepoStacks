@@ -59,6 +59,14 @@
 - Post-install steps remain out of scope by design (see ARCHITECTURE): the library
   downloads and verifies; it never runs anything it fetched.
 
+## Built (user import slice, v0.3.0)
+- **Import a GitHub user's projects** (CLI `import-user`, Add Volumes dialog):
+  paginated listing (100 per page, one API call each, spend reported), filters
+  for ownership (all/owned/member), forks (all/originals/forks), archived
+  (skip/include/only), and visibility (all/public/private); preview counts
+  first; entries arrive pre-filled with description, stars, language, license,
+  and topics; duplicates are skipped.
+
 ## Built (hardening slice, v0.2.0)
 - **Corruption-proof state**: catalogue, queue, and settings keep a backup
   generation; a damaged file is quarantined and the backup restored.

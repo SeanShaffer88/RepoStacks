@@ -31,3 +31,4 @@
 | `doctor` health check | yes | yes | — | CLI smoke 2026-11-10 |
 | Settings validation | yes | yes | yes | view tests |
 | Librarian metadata refresh (quota-governed) | yes | — | yes | window librarian pass |
+| Import a user's projects with filters | yes | yes | yes | user_import tests + live CLI run (312-repo listing, paginated) |

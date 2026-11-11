@@ -17,6 +17,9 @@ use repostacks_core::net::{
 };
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
+use repostacks_core::user_import::{
+    apply_user_import, fetch_user_repos, Archived, Forks, Ownership, UserRepoFilter, Visibility,
+};
 use repostacks_core::view::{render, status_of, Column, Density, GroupBy, Layout, Settings, Theme};
 use repostacks_core::RepoRef;
 use std::path::PathBuf;
@@ -174,6 +177,71 @@ fn run(args: &[String]) -> Result<(), String> {
                 if !report.added.is_empty() {
                     println!("Added volumes are on shelf '{shelf}'.");
                 }
+            }
+            Ok(())
+        }
+        "import-user" => {
+            // Import a GitHub user's projects, with filters:
+            //   --owned | --member            whose repos (default: all)
+            //   --forks | --sources           forks or originals (default: all)
+            //   --with-archived | --only-archived  (default: archived left out)
+            //   --public | --private          visibility (default: all)
+            //   --dry-run                     preview the counts, add nothing
+            let username = need(
+                args,
+                1,
+                "import-user <github-username> [--owned|--member] [--forks|--sources] [--with-archived|--only-archived] [--public|--private] [--dry-run]",
+            )?;
+            let mut filter = UserRepoFilter::default();
+            let mut dry_run = false;
+            for flag in &args[2..] {
+                match flag.as_str() {
+                    "--owned" => filter.ownership = Ownership::Owned,
+                    "--member" => filter.ownership = Ownership::Member,
+                    "--forks" => filter.forks = Forks::ForksOnly,
+                    "--sources" => filter.forks = Forks::SourcesOnly,
+                    "--with-archived" => filter.archived = Archived::Include,
+                    "--only-archived" => filter.archived = Archived::Only,
+                    "--public" => filter.visibility = Visibility::PublicOnly,
+                    "--private" => filter.visibility = Visibility::PrivateOnly,
+                    "--dry-run" => dry_run = true,
+                    other => return Err(format!("unknown flag '{other}' for import-user")),
+                }
+            }
+            let fetcher = CurlFetcher::default();
+            let tok = token();
+            let (repos, spent) = fetch_user_repos(&fetcher, username, tok.as_deref())?;
+            let mut cat = Catalog::load(&path)?;
+            let report =
+                apply_user_import(&mut cat, &repos, &filter, username, now_unix(), dry_run);
+            let matched = report.added.len() + report.duplicates.len();
+            println!(
+                "{username}: {} repo(s) listed, {} matched the filters, {} filtered out.",
+                repos.len(),
+                matched,
+                repos.len() - matched
+            );
+            for name in &report.added {
+                println!("  + {name}");
+            }
+            for name in &report.duplicates {
+                println!("  = {name} (already catalogued)");
+            }
+            if dry_run {
+                println!(
+                    "Dry run: nothing added. {} API call(s) spent listing.",
+                    spent
+                );
+            } else {
+                if !report.added.is_empty() {
+                    cat.save(&path)
+                        .map_err(|e| format!("save catalogue: {e}"))?;
+                }
+                println!(
+                    "Added {} volume(s). {} API call(s) spent listing.",
+                    report.added.len(),
+                    spent
+                );
             }
             Ok(())
         }
@@ -1130,6 +1198,7 @@ fn print_help() {
          Commands:\n  \
          add <owner/repo|URL>     Add a volume to the catalogue\n  \
          import <file|-> [shelf]  Bulk import, one repo per line, with preview counts\n  \
+         import-user <name> [filters]  Import a GitHub user's projects (--owned/--member, --forks/--sources, --with-archived/--only-archived, --public/--private, --dry-run)\n  \
          remove <owner/repo>       Remove a volume (and its shelf places)\n  \
          list                      List the catalogue with install/update badges\n  \
          shelf add <name> <repo>   Put a volume on a shelf\n  \

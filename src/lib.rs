@@ -14,6 +14,7 @@ pub mod queue;
 pub mod repo_ref;
 pub mod search;
 pub mod sha256;
+pub mod user_import;
 pub mod view;
 
 pub use atom::{parse_releases_atom, ReleaseNote};

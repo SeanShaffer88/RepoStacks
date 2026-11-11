@@ -597,6 +597,51 @@ $("#add-go").addEventListener("click", async () => {
   refreshCatalogue();
 });
 
+// ---------- Import from a GitHub user ----------
+function iuInput(dryRun) {
+  return {
+    username: $("#iu-name").value.trim(),
+    ownership: $("#iu-ownership").value,
+    forks: $("#iu-forks").value,
+    archived: $("#iu-archived").value,
+    visibility: $("#iu-visibility").value,
+    dry_run: dryRun,
+  };
+}
+$("#iu-preview").addEventListener("click", async () => {
+  const name = $("#iu-name").value.trim();
+  if (!name) {
+    $("#iu-report").textContent = "Type a GitHub username first.";
+    return;
+  }
+  $("#iu-report").textContent = "Listing projects…";
+  $("#iu-go").disabled = true;
+  try {
+    const r = await call("import_user", { input: iuInput(true) });
+    const matched = r.added.length + r.duplicates.length;
+    $("#iu-report").innerHTML =
+      `${esc(name)}: <strong>${r.listed} listed</strong>, ${matched} match the filters, ` +
+      `<strong>${r.added.length} would be added</strong>, ${r.duplicates.length} already catalogued. ` +
+      `Listing cost: ${r.quota} API call(s).`;
+    $("#iu-go").disabled = r.added.length === 0;
+    $("#iu-go").textContent = r.added.length ? `Import ${r.added.length} project(s)` : "Import";
+  } catch {
+    $("#iu-report").textContent = "";
+  }
+});
+$("#iu-go").addEventListener("click", async () => {
+  try {
+    const r = await call("import_user", { input: iuInput(false) });
+    $("#iu-report").innerHTML =
+      `Imported <strong>${r.added.length} project(s)</strong>; ${r.duplicates.length} were already catalogued.`;
+    $("#iu-go").disabled = true;
+    $("#iu-go").textContent = "Import";
+    refreshFacets();
+    refreshCatalogue();
+    toast(`Imported ${r.added.length} project(s).`);
+  } catch { /* the error was toasted by call() */ }
+});
+
 // ---------- Boot ----------
 (async () => {
   try {

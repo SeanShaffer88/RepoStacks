@@ -31,11 +31,14 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.2.0: the core library, command line, live network fetching, download engine,
+v0.3.0: import a GitHub user's whole project list with filters (owned/member,
+forks/originals, archived, public/private) from the window or the command
+line. The core library, command line, live network fetching, download engine,
 and the window are built, with corruption-proof state files, parallel release
 checks, retryable downloads, and an explainable auto-pick. The window has run
 on a real Windows machine (2026-11-11): the catalogue and volume detail
-screens render as designed — see Screenshots. Still unverified in the field:
+screens render as designed, and metadata refresh, release checks, and
+release history all work — see Screenshots. Still unverified in the field:
 the installer, token storage, downloads from the window, and the Librarian.
 
 ## Command line
@@ -47,6 +50,8 @@ Examples:
 
 ```text
 repostacks-cli add rust-lang/rust
+repostacks-cli import-user SeanShaffer88 --dry-run
+repostacks-cli import-user SeanShaffer88 --sources
 repostacks-cli shelf add "Dev Tools" rust-lang/rust
 repostacks-cli list
 repostacks-cli search compiler

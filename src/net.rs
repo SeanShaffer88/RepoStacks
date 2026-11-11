@@ -24,7 +24,7 @@ pub struct CheckOutcome {
 /// One transport-level retry: a dropped connection or a curl hiccup is
 /// worth exactly one second attempt. HTTP statuses are answers, not
 /// transport failures, and are never retried here.
-fn get_retry<F: Fetcher>(
+pub(crate) fn get_retry<F: Fetcher>(
     fetcher: &F,
     url: &str,
     etag: Option<&str>,

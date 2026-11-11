@@ -15,6 +15,9 @@ use repostacks_core::net::{
     auth_for_token, check_entries_parallel, fetch_release_assets, refresh_metadata, RefreshOutcome,
 };
 use repostacks_core::queue::{JobStatus, Queue};
+use repostacks_core::user_import::{
+    apply_user_import, fetch_user_repos, Archived, Forks, Ownership, UserRepoFilter, Visibility,
+};
 use repostacks_core::search::{execute as search_execute, Query};
 use repostacks_core::view::{status_of, Column, Density, GroupBy, Layout, Settings, Theme};
 use repostacks_core::RepoRef;
@@ -304,6 +307,82 @@ fn import_apply(
         "added": report.added,
         "duplicates": report.duplicates,
         "invalid": report.invalid.iter().map(|(l, w)| serde_json::json!([l, w])).collect::<Vec<_>>(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct UserImportDto {
+    username: String,
+    ownership: String,
+    forks: String,
+    archived: String,
+    visibility: String,
+    dry_run: bool,
+}
+
+/// Import a GitHub user's projects. The listing fetch runs without the
+/// state lock; the apply merges under it. `dry_run` previews the counts
+/// and adds nothing.
+#[tauri::command]
+fn import_user(state: State<'_, AppState>, input: UserImportDto) -> Result<serde_json::Value, String> {
+    let filter = UserRepoFilter {
+        ownership: match input.ownership.as_str() {
+            "all" => Ownership::All,
+            "owned" => Ownership::Owned,
+            "member" => Ownership::Member,
+            other => return Err(format!("unknown ownership filter '{other}'")),
+        },
+        forks: match input.forks.as_str() {
+            "all" => Forks::All,
+            "forks" => Forks::ForksOnly,
+            "sources" => Forks::SourcesOnly,
+            other => return Err(format!("unknown fork filter '{other}'")),
+        },
+        archived: match input.archived.as_str() {
+            "exclude" => Archived::Exclude,
+            "include" => Archived::Include,
+            "only" => Archived::Only,
+            other => return Err(format!("unknown archived filter '{other}'")),
+        },
+        visibility: match input.visibility.as_str() {
+            "all" => Visibility::All,
+            "public" => Visibility::PublicOnly,
+            "private" => Visibility::PrivateOnly,
+            other => return Err(format!("unknown visibility filter '{other}'")),
+        },
+    };
+    let token = {
+        let inner = state.inner.lock().unwrap();
+        state.token(&inner)
+    };
+    let fetcher = CurlFetcher::default();
+    let (repos, spent) = fetch_user_repos(&fetcher, &input.username, token.as_deref())?;
+    let mut inner = state.inner.lock().unwrap();
+    let report = apply_user_import(
+        &mut inner.catalog,
+        &repos,
+        &filter,
+        &input.username,
+        now_unix(),
+        input.dry_run,
+    );
+    if !input.dry_run && !report.added.is_empty() {
+        log(
+            &mut inner,
+            format!(
+                "Imported {} project(s) from {} ({} already catalogued)",
+                report.added.len(),
+                input.username,
+                report.duplicates.len()
+            ),
+        );
+        state.save_catalog(&inner)?;
+    }
+    Ok(serde_json::json!({
+        "listed": repos.len(),
+        "added": report.added,
+        "duplicates": report.duplicates,
+        "quota": spent,
     }))
 }
 
@@ -980,6 +1059,7 @@ fn main() {
             add_repo,
             remove_repo,
             import_apply,
+            import_user,
             list_shelves,
             shelf_add,
             shelf_remove,

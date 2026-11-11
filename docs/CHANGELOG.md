@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-11-11
+- Import a GitHub user's projects: the Add Volumes dialog and the CLI
+  (`import-user`) list everything a user has on GitHub and import it with
+  filters — only owned or member-of, forks or original projects, archived
+  skipped/included/only, public or private. A preview shows the counts
+  before anything is added; imports arrive with description, stars,
+  language, license, and topics already filled in, and duplicates are
+  skipped. One API call per 100 repos, and the spend is reported.
+
 ## 0.2.1 — 2026-11-11
 - No more flashing command-prompt windows: every background curl call
   (release checks, metadata refreshes, asset listings, downloads) now runs
