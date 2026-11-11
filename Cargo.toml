@@ -1,6 +1,6 @@
 [package]
 name = "repostacks"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 description = "Your GitHub library for Windows — catalogue repos on shelves, watch releases with Atom feeds, and queue downloads with the right asset every time."

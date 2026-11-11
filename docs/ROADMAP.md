@@ -14,5 +14,8 @@
    Portable.zip + SHA256SUMS.txt.
 6. **API-usage meter** (done, v0.9.0) — persistent local ledger of counted REST
    calls by purpose; CLI `usage` command and a Librarian-screen meter.
-7. **Next** — fresh README screenshots from the current interface (captures come
+7. **Performance evidence** (done, v0.10.0) — a built-in `bench` command
+   timing the core operations over a synthetic 5,000-volume catalogue,
+   with the recorded run kept in docs/PERFORMANCE.md.
+8. **Next** — fresh README screenshots from the current interface (captures come
    from a real run), then further slices as directed.

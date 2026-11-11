@@ -162,6 +162,17 @@
   this app's own calls — it is not a live GitHub reading, and free
   Atom release checks are never recorded.
 
+## Built (performance evidence slice, v0.10.0)
+- **Built-in benchmark**: the CLI command `bench` times the core
+  operations over a synthetic catalogue (default 5,000 volumes,
+  `--repos N` to change it, `--json` for scripts): catalogue save and
+  load through the real persistence layer, plain-text and
+  field-filtered rich searches, the facet counts, the Atom feed
+  parser, and the parallel release-check pipeline at concurrency 1
+  and 8 with the network replaced by a stub fetcher. The synthetic
+  data is fixed-seed, so runs are comparable over time. The recorded
+  measurements and method live in `docs/PERFORMANCE.md`.
+
 ## Planned
 - Fresh README screenshots from the current user interface
   (captures come from a real run; the existing ones predate v0.5.0).

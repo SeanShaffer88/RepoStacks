@@ -2,6 +2,7 @@
 //! the CLI (and later the Tauri window) are thin surfaces over it.
 
 pub mod atom;
+pub mod bench;
 pub mod cache_policy;
 pub mod catalog;
 pub mod download;
@@ -19,6 +20,7 @@ pub mod user_import;
 pub mod view;
 
 pub use atom::{parse_releases_atom, ReleaseNote};
+pub use bench::{BenchReport, BenchScenario};
 pub use cache_policy::{Auth, CachePolicy};
 pub use catalog::{Catalog, RepoEntry};
 pub use queue::{DownloadJob, JobStatus, Queue};
