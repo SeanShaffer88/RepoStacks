@@ -438,7 +438,7 @@ fn refresh_all(state: State<'_, AppState>, force: bool) -> Result<serde_json::Va
 }
 
 #[tauri::command]
-fn release_history(state: State<'_, AppState>, repo: String) -> Result<serde_json::Value, String> {
+fn release_history(_state: State<'_, AppState>, repo: String) -> Result<serde_json::Value, String> {
     let repo = RepoRef::parse(&repo).map_err(|e| e.0)?;
     let fetcher = CurlFetcher::default();
     let resp = fetcher.get(&repo.releases_atom_url(), None, None)?;
@@ -750,20 +750,29 @@ fn librarian_pass(state: &AppState) -> Vec<String> {
         .collect();
     let mut to_download: Vec<(RepoRef, String)> = Vec::new();
     for repo in &repos {
-        let entry = inner.catalog.get_mut(repo).expect("listed");
-        if let Ok(out) = check_releases(&fetcher, entry, now) {
-            if out.changed {
-                log(
-                    &mut inner,
-                    format!("{repo}: new release {}", out.latest_tag),
-                );
+        // Read what the pass needs from the entry first; the borrow must be
+        // released before logging (which also borrows `inner`).
+        let mut new_release: Option<String> = None;
+        let mut download: Option<String> = None;
+        {
+            let entry = inner.catalog.get_mut(repo).expect("listed");
+            if let Ok(out) = check_releases(&fetcher, entry, now) {
+                if out.changed {
+                    new_release = Some(out.latest_tag.clone());
+                }
+                if entry.auto_download
+                    && !out.latest_tag.is_empty()
+                    && out.latest_tag != entry.installed_tag
+                {
+                    download = Some(out.latest_tag.clone());
+                }
             }
-            if entry.auto_download
-                && !out.latest_tag.is_empty()
-                && out.latest_tag != entry.installed_tag
-            {
-                to_download.push((repo.clone(), out.latest_tag.clone()));
-            }
+        }
+        if let Some(tag) = &new_release {
+            log(&mut inner, format!("{repo}: new release {tag}"));
+        }
+        if let Some(tag) = download {
+            to_download.push((repo.clone(), tag));
         }
     }
     inner.last_atom_run = now;
