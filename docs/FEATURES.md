@@ -59,6 +59,29 @@
 - Post-install steps remain out of scope by design (see ARCHITECTURE): the library
   downloads and verifies; it never runs anything it fetched.
 
+## Built (ten-improvement slice, v0.6.0)
+- Volume page freshness: opening a volume checks that repo alone (free
+  Atom call) and re-renders with the fresh tag when it moved.
+- Fork counts recorded by metadata refresh and account imports; the
+  volume page header shows the real number.
+- Release notes expand inline on the volume page (from the Atom
+  feed's content, HTML reduced to plain text; no API cost).
+- Catalogue Select mode with a bulk bar: Add to shelf, Check selected,
+  Remove selected (armed) across many volumes in any layout.
+- Organization imports: CLI `import-org`, Add Volumes account-type
+  switch; same filters minus ownership.
+- Per-shelf Update: Shelves screen button and CLI `shelf update` —
+  parallel member checks, then downloads for the outdated.
+- Download speed + ETA in Acquisitions, derived from queue polls.
+- Catalogue backup/restore on the Librarian screen via
+  `repostacks-catalogue-export.json` in the downloads folder.
+- System tray presence: close parks the app in the tray, the
+  Librarian keeps its schedule, tray tooltip + window title carry the
+  updates count, tray menu offers Open / Check for updates / Quit.
+- Data-home fallback: an unwritable program folder moves the library
+  to %LOCALAPPDATA%\RepoStacks\data (portable keeps `data\` beside
+  the exe).
+
 ## Built (suggested-rules slice, v0.5.0)
 - **Self-suggesting asset rules**: `suggest_asset_patterns` (core) turns a
   release's file names into rules — version generalized to `*`, sidecars

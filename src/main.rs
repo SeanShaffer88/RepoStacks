@@ -22,7 +22,8 @@ use repostacks_core::net::{
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
 use repostacks_core::user_import::{
-    apply_user_import, fetch_user_repos, Archived, Forks, Ownership, UserRepoFilter, Visibility,
+    apply_user_import, fetch_org_repos, fetch_user_repos, Archived, Forks, Ownership,
+    UserRepoFilter, Visibility,
 };
 use repostacks_core::view::{render, status_of, Column, Density, GroupBy, Layout, Settings, Theme};
 use repostacks_core::RepoRef;
@@ -184,22 +185,36 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
-        "import-user" => {
-            // Import a GitHub user's projects, with filters:
-            //   --owned | --member            whose repos (default: all)
+        "import-user" | "import-org" => {
+            // Import a GitHub user's (or organization's) projects, with
+            // filters:
+            //   --owned | --member            whose repos (default: all;
+            //                                 users only — an org listing
+            //                                 spans many owners)
             //   --forks | --sources           forks or originals (default: all)
             //   --with-archived | --only-archived  (default: archived left out)
             //   --public | --private          visibility (default: all)
             //   --dry-run                     preview the counts, add nothing
+            let org = cmd == "import-org";
             let username = need(
                 args,
                 1,
-                "import-user <github-username> [--owned|--member] [--forks|--sources] [--with-archived|--only-archived] [--public|--private] [--dry-run]",
+                if org {
+                    "import-org <github-org> [--forks|--sources] [--with-archived|--only-archived] [--public|--private] [--dry-run]"
+                } else {
+                    "import-user <github-username> [--owned|--member] [--forks|--sources] [--with-archived|--only-archived] [--public|--private] [--dry-run]"
+                },
             )?;
             let mut filter = UserRepoFilter::default();
             let mut dry_run = false;
             for flag in &args[2..] {
                 match flag.as_str() {
+                    "--owned" | "--member" if org => {
+                        return Err(
+                            "--owned/--member do not apply to organizations: an org listing spans many owners"
+                                .into(),
+                        )
+                    }
                     "--owned" => filter.ownership = Ownership::Owned,
                     "--member" => filter.ownership = Ownership::Member,
                     "--forks" => filter.forks = Forks::ForksOnly,
@@ -209,12 +224,16 @@ fn run(args: &[String]) -> Result<(), String> {
                     "--public" => filter.visibility = Visibility::PublicOnly,
                     "--private" => filter.visibility = Visibility::PrivateOnly,
                     "--dry-run" => dry_run = true,
-                    other => return Err(format!("unknown flag '{other}' for import-user")),
+                    other => return Err(format!("unknown flag '{other}' for {cmd}")),
                 }
             }
             let fetcher = CurlFetcher::default();
             let tok = token();
-            let (repos, spent) = fetch_user_repos(&fetcher, username, tok.as_deref())?;
+            let (repos, spent) = if org {
+                fetch_org_repos(&fetcher, username, tok.as_deref())?
+            } else {
+                fetch_user_repos(&fetcher, username, tok.as_deref())?
+            };
             let mut cat = Catalog::load(&path)?;
             let report =
                 apply_user_import(&mut cat, &repos, &filter, username, now_unix(), dry_run);
@@ -372,8 +391,71 @@ fn run(args: &[String]) -> Result<(), String> {
                     }
                     Ok(())
                 }
+                Some("update") => {
+                    // Check every member (Atom, free, in parallel), then
+                    // download the ones with something newer — the same
+                    // per-volume flow as `update`, via the download arm.
+                    let name = need(args, 2, "shelf update <name>")?;
+                    let mut cat = Catalog::load(&path)?;
+                    let members: Vec<RepoRef> = cat
+                        .shelf_members(name)
+                        .iter()
+                        .map(|e| e.repo.clone())
+                        .collect();
+                    if members.is_empty() {
+                        println!("Shelf '{name}' is empty.");
+                        return Ok(());
+                    }
+                    let settings = Settings::load(&settings_path())?;
+                    let fetcher = CurlFetcher::default();
+                    let snapshots: Vec<RepoEntry> = members
+                        .iter()
+                        .filter_map(|r| cat.get(r).cloned())
+                        .collect();
+                    let results = check_entries_parallel(
+                        &fetcher,
+                        &snapshots,
+                        now_unix(),
+                        settings.concurrency as usize,
+                    );
+                    let mut todo: Vec<RepoRef> = Vec::new();
+                    for r in &results {
+                        if let Some(slot) = cat.get_mut(&r.repo) {
+                            slot.latest_tag = r.entry.latest_tag.clone();
+                            slot.last_release_check = r.entry.last_release_check;
+                        }
+                        match &r.outcome {
+                            Ok(_) => {
+                                if !r.entry.latest_tag.is_empty()
+                                    && r.entry.latest_tag != r.entry.installed_tag
+                                {
+                                    println!("{}: {} available.", r.repo, r.entry.latest_tag);
+                                    todo.push(r.repo.clone());
+                                } else {
+                                    println!("{}: up to date.", r.repo);
+                                }
+                            }
+                            Err(msg) => println!("{}: {msg}", r.repo),
+                        }
+                    }
+                    cat.save(&path)
+                        .map_err(|e| format!("save catalogue: {e}"))?;
+                    let mut failed = 0;
+                    for repo in todo {
+                        let sub: Vec<String> = vec!["download".into(), repo.full_name()];
+                        if run(&sub).is_err() {
+                            failed += 1;
+                        }
+                    }
+                    if failed > 0 {
+                        Err(format!("{failed} shelf update(s) failed"))
+                    } else {
+                        Ok(())
+                    }
+                }
                 _ => Err(
-                    "usage: repostacks shelf add <name> <owner/repo> | shelf list <name>".into(),
+                    "usage: repostacks shelf add <name> <owner/repo> | shelf list <name> | shelf update <name>"
+                        .into(),
                 ),
             }
         }
@@ -1334,12 +1416,14 @@ fn print_help() {
          add <owner/repo|URL>     Add a volume to the catalogue\n  \
          import <file|-> [shelf]  Bulk import, one repo per line, with preview counts\n  \
          import-user <name> [filters]  Import a GitHub user's projects (--owned/--member, --forks/--sources, --with-archived/--only-archived, --public/--private, --dry-run)\n  \
+         import-org <name> [filters]  Import a GitHub organization's projects (same filters, minus --owned/--member)\n  \
          export [--json] [file]    Export the catalogue (importable list, or full JSON)\n  \
          clean [--yes]             Remove stale download folders + orphan .part files (dry run without --yes)\n  \
          remove <owner/repo>       Remove a volume (and its shelf places)\n  \
          list                      List the catalogue with install/update badges\n  \
          shelf add <name> <repo>   Put a volume on a shelf\n  \
          shelf list <name>         Show a shelf\n  \
+         shelf update <name>       Check a shelf's members and download their updates\n  \
          search <text>             Search name, description, language, topics\n  \
          facets                    Language and topic counts for the filter panel\n  \
          find <query>              Rich search: lang: topic: license: owner: shelf:NAME tag:v1 stars:>1000 has:update is:installed is:due sort:-stars limit:10; prefix any term with - to exclude it\n  \

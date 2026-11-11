@@ -19,7 +19,8 @@ use repostacks_core::net::{
 };
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::user_import::{
-    apply_user_import, fetch_user_repos, Archived, Forks, Ownership, UserRepoFilter, Visibility,
+    apply_user_import, fetch_org_repos, fetch_user_repos, Archived, Forks, Ownership,
+    UserRepoFilter, Visibility,
 };
 use repostacks_core::search::{execute as search_execute, Query};
 use repostacks_core::view::{status_of, Column, Density, GroupBy, Layout, Settings, Theme};
@@ -36,6 +37,8 @@ struct Inner {
     activity: Vec<String>,
     last_atom_run: u64,
     last_metadata_run: u64,
+    /// Last (bytes_done, instant) seen per job, for live speed/ETA.
+    speed_samples: std::collections::HashMap<u64, (u64, std::time::Instant)>,
 }
 
 struct AppState {
@@ -114,6 +117,7 @@ fn now_unix() -> u64 {
 fn apply_refreshed(stored: &mut RepoEntry, refreshed: &RepoEntry) {
     stored.description = refreshed.description.clone();
     stored.stars = refreshed.stars;
+    stored.forks = refreshed.forks;
     stored.language = refreshed.language.clone();
     stored.license = refreshed.license.clone();
     stored.topics = refreshed.topics.clone();
@@ -139,6 +143,7 @@ struct EntryDto {
     name: String,
     description: String,
     stars: u64,
+    forks: u64,
     language: String,
     license: String,
     topics: Vec<String>,
@@ -157,6 +162,7 @@ fn entry_dto(e: &repostacks_core::catalog::RepoEntry, catalog: &Catalog) -> Entr
         name: e.repo.name.clone(),
         description: e.description.clone(),
         stars: e.stars,
+        forks: e.forks,
         language: e.language.clone(),
         license: e.license.clone(),
         topics: e.topics.clone(),
@@ -209,12 +215,17 @@ struct JobDto {
     bytes_total: u64,
     percent: f64,
     error: String,
+    /// Live transfer rate (bytes/sec) and estimated seconds remaining,
+    /// derived from successive queue polls; 0 when unknown.
+    speed_bps: u64,
+    eta_secs: u64,
 }
 
 // ---------- Catalogue commands ----------
 
 #[tauri::command]
-fn overview(state: State<'_, AppState>) -> Result<OverviewDto, String> {
+fn overview(state: State<'_, AppState>, app: AppHandle) -> Result<OverviewDto, String> {
+    update_presence(&app);
     let inner = state.inner.lock().unwrap();
     Ok(OverviewDto {
         volumes: inner.catalog.entries.len(),
@@ -277,6 +288,103 @@ fn remove_repo(state: State<'_, AppState>, repo: String) -> Result<(), String> {
     let mut inner = state.inner.lock().unwrap();
     inner.catalog.remove(&repo);
     state.save_catalog(&inner)
+}
+
+/// Put many volumes on a shelf at once; returns how many placements
+/// were new.
+#[tauri::command]
+fn bulk_shelf_add(
+    state: State<'_, AppState>,
+    shelf: String,
+    repos: Vec<String>,
+) -> Result<usize, String> {
+    let shelf = shelf.trim().to_string();
+    if shelf.is_empty() {
+        return Err("A shelf needs a name.".into());
+    }
+    let mut inner = state.inner.lock().unwrap();
+    let mut placed = 0;
+    for name in &repos {
+        if let Ok(repo) = RepoRef::parse(name) {
+            if inner.catalog.add_to_shelf(&shelf, &repo) {
+                placed += 1;
+            }
+        }
+    }
+    if placed > 0 {
+        log(
+            &mut inner,
+            format!("Put {placed} volume(s) on shelf '{shelf}'"),
+        );
+        state.save_catalog(&inner)?;
+    }
+    Ok(placed)
+}
+
+/// Remove many volumes at once (the UI arms this like any removal).
+#[tauri::command]
+fn bulk_remove(state: State<'_, AppState>, repos: Vec<String>) -> Result<usize, String> {
+    let mut inner = state.inner.lock().unwrap();
+    let mut removed = 0;
+    for name in &repos {
+        if let Ok(repo) = RepoRef::parse(name) {
+            if inner.catalog.get(&repo).is_some() {
+                inner.catalog.remove(&repo);
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        log(&mut inner, format!("Removed {removed} volume(s)"));
+        state.save_catalog(&inner)?;
+    }
+    Ok(removed)
+}
+
+/// Write the full catalogue JSON into the downloads folder as
+/// `repostacks-catalogue-export.json` — the window's backup, matching
+/// the CLI's `export --json`. Returns the file path.
+#[tauri::command]
+fn export_catalog(state: State<'_, AppState>) -> Result<String, String> {
+    let mut inner = state.inner.lock().unwrap();
+    let root = state.downloads_root(&inner.settings);
+    std::fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
+    let file = root.join("repostacks-catalogue-export.json");
+    std::fs::write(&file, inner.catalog.to_json().to_string_pretty())
+        .map_err(|e| format!("write {}: {e}", file.display()))?;
+    log(
+        &mut inner,
+        format!(
+            "Exported {} volume(s) to {}",
+            inner.catalog.entries.len(),
+            file.display()
+        ),
+    );
+    Ok(file.display().to_string())
+}
+
+/// Replace the catalogue with a backup written by export_catalog (the
+/// same fixed file in the downloads folder). The current catalogue is
+/// kept as the save system's `.bak` when the import is written.
+#[tauri::command]
+fn import_catalog(state: State<'_, AppState>) -> Result<usize, String> {
+    let mut inner = state.inner.lock().unwrap();
+    let root = state.downloads_root(&inner.settings);
+    let file = root.join("repostacks-catalogue-export.json");
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| format!("read {}: {e} — export a catalogue there first", file.display()))?;
+    let parsed = repostacks_core::json::parse(&text)
+        .map_err(|e| format!("{} did not parse: {e}", file.display()))?;
+    let cat = Catalog::from_json(&parsed)
+        .map_err(|e| format!("{} is not a usable catalogue backup: {e}", file.display()))?;
+    let count = cat.entries.len();
+    inner.catalog = cat;
+    log(
+        &mut inner,
+        format!("Imported a catalogue backup: {count} volume(s)"),
+    );
+    state.save_catalog(&inner)?;
+    Ok(count)
 }
 
 #[tauri::command]
@@ -404,6 +512,8 @@ fn saved_delete(state: State<'_, AppState>, name: String) -> Result<serde_json::
 #[derive(serde::Deserialize)]
 struct UserImportDto {
     username: String,
+    #[serde(default)]
+    org: bool,
     ownership: String,
     forks: String,
     archived: String,
@@ -447,7 +557,11 @@ fn import_user(state: State<'_, AppState>, input: UserImportDto) -> Result<serde
         state.token(&inner)
     };
     let fetcher = CurlFetcher::default();
-    let (repos, spent) = fetch_user_repos(&fetcher, &input.username, token.as_deref())?;
+    let (repos, spent) = if input.org {
+        fetch_org_repos(&fetcher, &input.username, token.as_deref())?
+    } else {
+        fetch_user_repos(&fetcher, &input.username, token.as_deref())?
+    };
     let mut inner = state.inner.lock().unwrap();
     let report = apply_user_import(
         &mut inner.catalog,
@@ -540,16 +654,46 @@ fn set_auto(state: State<'_, AppState>, repo: String, on: bool) -> Result<(), St
 // ---------- Network commands ----------
 
 #[tauri::command]
-fn check_all(state: State<'_, AppState>) -> Result<Vec<CheckDto>, String> {
+fn check_all(state: State<'_, AppState>, app: AppHandle) -> Result<Vec<CheckDto>, String> {
+    let out = check_impl(&state, None)?;
+    update_presence(&app);
+    Ok(out)
+}
+
+/// Check a chosen subset (the volume page's single-volume check, the
+/// catalogue's bulk check). Same snapshot/merge discipline as check_all.
+#[tauri::command]
+fn check_repos(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    repos: Vec<String>,
+) -> Result<Vec<CheckDto>, String> {
+    let want: Vec<RepoRef> = repos
+        .iter()
+        .filter_map(|r| RepoRef::parse(r).ok())
+        .collect();
+    let out = check_impl(&state, Some(&want))?;
+    update_presence(&app);
+    Ok(out)
+}
+
+fn check_impl(state: &AppState, only: Option<&[RepoRef]>) -> Result<Vec<CheckDto>, String> {
     // Snapshot, then run the checks in parallel WITHOUT holding the
     // state lock — the rest of the app stays responsive while the
     // network works. Results merge back under the lock at the end.
     let (entries, concurrency) = {
         let inner = state.inner.lock().unwrap();
-        (
-            inner.catalog.entries.clone(),
-            inner.settings.concurrency as usize,
-        )
+        let entries = match only {
+            Some(want) => inner
+                .catalog
+                .entries
+                .iter()
+                .filter(|e| want.contains(&e.repo))
+                .cloned()
+                .collect(),
+            None => inner.catalog.entries.clone(),
+        };
+        (entries, inner.settings.concurrency as usize)
     };
     let fetcher = CurlFetcher::default();
     let now = now_unix();
@@ -581,11 +725,21 @@ fn check_all(state: State<'_, AppState>) -> Result<Vec<CheckDto>, String> {
             }),
         }
     }
-    inner.last_atom_run = now;
-    log(
-        &mut inner,
-        "Checked all volumes via Atom feeds (0 API calls)".into(),
-    );
+    if only.is_none() {
+        inner.last_atom_run = now;
+        log(
+            &mut inner,
+            "Checked all volumes via Atom feeds (0 API calls)".into(),
+        );
+    } else {
+        log(
+            &mut inner,
+            format!(
+                "Checked {} volume(s) via Atom feeds (0 API calls)",
+                entries.len()
+            ),
+        );
+    }
     state.save_catalog(&inner)?;
     Ok(out)
 }
@@ -664,7 +818,7 @@ fn release_history(_state: State<'_, AppState>, repo: String) -> Result<serde_js
     let notes = parse_releases_atom(&resp.body);
     Ok(serde_json::json!(notes
         .iter()
-        .map(|n| serde_json::json!({ "tag": n.tag, "title": n.title, "updated": n.updated }))
+        .map(|n| serde_json::json!({ "tag": n.tag, "title": n.title, "updated": n.updated, "body": n.body }))
         .collect::<Vec<_>>()))
 }
 
@@ -766,23 +920,60 @@ fn download_repo(
 
 #[tauri::command]
 fn queue_list(state: State<'_, AppState>) -> Result<Vec<JobDto>, String> {
-    let inner = state.inner.lock().unwrap();
-    Ok(inner
+    let mut inner = state.inner.lock().unwrap();
+    // Snapshot the job fields first so the speed samples can be
+    // updated while the DTOs are built.
+    let raw: Vec<(u64, String, String, String, JobStatus, u64, u64, f64, String)> = inner
         .queue
         .jobs
         .iter()
-        .map(|j| JobDto {
-            id: j.id,
-            repo: j.repo.full_name(),
-            tag: j.tag.clone(),
-            asset_name: j.asset_name.clone(),
-            status: j.status.label().to_string(),
-            bytes_done: j.bytes_done,
-            bytes_total: j.bytes_total,
-            percent: j.progress_percent(),
-            error: j.error.clone(),
+        .map(|j| {
+            (
+                j.id,
+                j.repo.full_name(),
+                j.tag.clone(),
+                j.asset_name.clone(),
+                j.status,
+                j.bytes_done,
+                j.bytes_total,
+                j.progress_percent(),
+                j.error.clone(),
+            )
         })
-        .collect())
+        .collect();
+    let now_i = std::time::Instant::now();
+    let mut out = Vec::with_capacity(raw.len());
+    for (id, repo, tag, asset_name, status, done, total, percent, error) in raw {
+        let (mut speed_bps, mut eta_secs) = (0u64, 0u64);
+        if status == JobStatus::Downloading {
+            if let Some(&(prev_bytes, prev_t)) = inner.speed_samples.get(&id) {
+                let dt = now_i.duration_since(prev_t).as_secs_f64();
+                if dt >= 0.5 && done > prev_bytes {
+                    speed_bps = ((done - prev_bytes) as f64 / dt) as u64;
+                    if speed_bps > 0 && total > done {
+                        eta_secs = (total - done) / speed_bps;
+                    }
+                }
+            }
+            inner.speed_samples.insert(id, (done, now_i));
+        } else {
+            inner.speed_samples.remove(&id);
+        }
+        out.push(JobDto {
+            id,
+            repo,
+            tag,
+            asset_name,
+            status: status.label().to_string(),
+            bytes_done: done,
+            bytes_total: total,
+            percent,
+            error,
+            speed_bps,
+            eta_secs,
+        });
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -1095,8 +1286,10 @@ fn librarian_pass(state: &AppState) -> Vec<String> {
 }
 
 #[tauri::command]
-fn librarian_now(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    Ok(librarian_pass(&state))
+fn librarian_now(state: State<'_, AppState>, app: AppHandle) -> Result<Vec<String>, String> {
+    let lines = librarian_pass(&state);
+    update_presence(&app);
+    Ok(lines)
 }
 
 fn scheduler_loop(handle: AppHandle) {
@@ -1127,6 +1320,7 @@ fn scheduler_loop(handle: AppHandle) {
                     lines
                 }
             };
+            update_presence(&handle);
             if !lines.is_empty() {
                 let _ = handle.emit("librarian-activity", lines);
             }
@@ -1134,11 +1328,74 @@ fn scheduler_loop(handle: AppHandle) {
     }
 }
 
+/// Is this folder usable for the library's data? (Creates it and
+/// proves a write + remove work.)
+fn dir_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".repostacks-probe");
+    std::fs::write(&probe, b"ok")
+        .and_then(|_| std::fs::remove_file(&probe))
+        .is_ok()
+}
+
+/// Where the library's data lives: beside the exe when that folder is
+/// writable (the portable story); when it is not — an installed copy
+/// under Program Files — fall back to %LOCALAPPDATA%\RepoStacks so
+/// saves cannot fail just because of where the app was installed.
+fn choose_data_dir(exe_dir: &std::path::Path) -> PathBuf {
+    let beside = exe_dir.join("data");
+    if dir_writable(&beside) {
+        return beside;
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let fallback = PathBuf::from(local).join("RepoStacks").join("data");
+        if dir_writable(&fallback) {
+            return fallback;
+        }
+    }
+    beside
+}
+
+/// Refresh the tray tooltip and the window title with the number of
+/// volumes that have an update waiting.
+fn update_presence(app: &AppHandle) {
+    let count = {
+        let state = app.state::<AppState>();
+        let inner = state.inner.lock().unwrap();
+        inner
+            .catalog
+            .entries
+            .iter()
+            .filter(|e| e.update_available())
+            .count()
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    let title = if count == 0 {
+        "RepoStacks — The Stacks".to_string()
+    } else {
+        format!("RepoStacks — The Stacks ({count} update{plural})")
+    };
+    let tip = if count == 0 {
+        "RepoStacks — The Stacks".to_string()
+    } else {
+        format!("RepoStacks — {count} update{plural} waiting")
+    };
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_title(&title);
+    }
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(tip.as_str()));
+    }
+}
+
 fn main() {
     let exe_dir = std::env::current_exe()
         .map(|p| p.parent().map(|d| d.to_path_buf()).unwrap_or_default())
         .unwrap_or_default();
-    let data_dir = exe_dir.join("data");
+    let data_dir = choose_data_dir(&exe_dir);
+    let fell_back = data_dir != exe_dir.join("data");
     let state = AppState {
         inner: Mutex::new(Inner {
             catalog: Catalog::default(),
@@ -1147,6 +1404,7 @@ fn main() {
             activity: Vec::new(),
             last_atom_run: 0,
             last_metadata_run: 0,
+            speed_samples: std::collections::HashMap::new(),
         }),
         data_dir,
         exe_dir,
@@ -1178,11 +1436,91 @@ fn main() {
             ),
         }
         log(&mut inner, "The Stacks opened".into());
+        if fell_back {
+            log(
+                &mut inner,
+                format!(
+                    "The program folder is not writable, so your library lives in {}",
+                    state.data_dir.display()
+                ),
+            );
+        }
     }
     tauri::Builder::default()
         .manage(state)
+        .on_window_event(|window, event| {
+            // Closing the window parks RepoStacks in the tray — the
+            // Librarian keeps its schedule there. Quit lives in the
+            // tray menu.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
+            // System tray: presence with an updates count, Open /
+            // Check now / Quit.
+            {
+                use tauri::menu::{Menu, MenuItem};
+                use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+                let open_item =
+                    MenuItem::with_id(app, "tray_open", "Open RepoStacks", true, None::<&str>)
+                        .expect("tray menu");
+                let check_item = MenuItem::with_id(
+                    app,
+                    "tray_check",
+                    "Check for updates",
+                    true,
+                    None::<&str>,
+                )
+                .expect("tray menu");
+                let quit_item =
+                    MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)
+                        .expect("tray menu");
+                let menu = Menu::with_items(app, &[&open_item, &check_item, &quit_item])
+                    .expect("tray menu");
+                let mut builder = TrayIconBuilder::with_id("main")
+                    .menu(&menu)
+                    .tooltip("RepoStacks — The Stacks")
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "tray_open" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "tray_check" => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                let state = app.state::<AppState>();
+                                if check_impl(&state, None).is_ok() {
+                                    update_presence(&app);
+                                }
+                            });
+                        }
+                        "tray_quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() {
+                    builder = builder.icon(icon.clone());
+                }
+                let _ = builder.build(app);
+            }
             // Optional check-on-start: one Librarian pass shortly after
             // launch, on its own thread so the window opens instantly.
             {
@@ -1227,6 +1565,11 @@ fn main() {
             set_rules,
             set_auto,
             check_all,
+            check_repos,
+            bulk_shelf_add,
+            bulk_remove,
+            export_catalog,
+            import_catalog,
             refresh_all,
             release_history,
             release_assets,

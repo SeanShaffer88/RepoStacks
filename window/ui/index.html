@@ -99,8 +99,17 @@
           </select>
         </label>
         <span class="spacer"></span>
+        <button id="select-mode" aria-pressed="false">Select</button>
         <button id="check-now">Check for releases</button>
         <button id="refresh-meta">Refresh metadata</button>
+      </div>
+      <div id="bulk-bar" class="hidden">
+        <span id="bulk-count" role="status"></span>
+        <input id="bulk-shelf" type="text" placeholder="Shelf name" aria-label="Shelf name for the selected volumes">
+        <button id="bulk-to-shelf">Add to shelf</button>
+        <button id="bulk-check">Check selected</button>
+        <button id="bulk-remove">Remove selected</button>
+        <button id="bulk-clear">Clear</button>
       </div>
       <div id="entries"></div>
     </div>
@@ -169,6 +178,20 @@
           <button id="token-clear">Remove token</button>
         </div>
       </div>
+      <div class="panel">
+        <h3>Catalogue backup</h3>
+        <p class="note">Export writes the whole catalogue to
+        <code>repostacks-catalogue-export.json</code> in your downloads
+        folder. Import reads that same file and replaces the catalogue —
+        the current one is kept as a backup on disk.</p>
+        <div class="row">
+          <button id="backup-export">Export catalogue</button>
+          <button id="backup-import">Import catalogue</button>
+        </div>
+        <p class="note">Tip: closing the window keeps RepoStacks in the
+        system tray, where the Librarian keeps its schedule and the icon
+        tells you how many updates are waiting. Quit from the tray menu.</p>
+      </div>
       <div class="panel wide">
         <h3>Activity</h3>
         <div id="activity-log"></div>
@@ -190,8 +213,15 @@
     <div id="add-report"></div>
     <fieldset class="iu">
       <legend>…or import a GitHub user's projects</legend>
-      <label>GitHub username
-        <input id="iu-name" type="text" placeholder="e.g. SeanShaffer88"></label>
+      <div class="row">
+        <label>Account type
+          <select id="iu-acct">
+            <option value="user">User</option>
+            <option value="org">Organization</option>
+          </select></label>
+        <label id="iu-name-label">GitHub username
+          <input id="iu-name" type="text" placeholder="e.g. SeanShaffer88"></label>
+      </div>
       <div class="row">
         <label>Whose
           <select id="iu-ownership">

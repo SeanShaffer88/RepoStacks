@@ -118,6 +118,7 @@ pub fn refresh_metadata<F: Fetcher>(
             let v = json::parse(&resp.body).map_err(|e| format!("metadata for {} did not parse: {e}", entry.repo))?;
             entry.description = v.get("description").and_then(json::Json::as_str).unwrap_or("").to_string();
             entry.stars = v.get("stargazers_count").and_then(json::Json::as_f64).unwrap_or(0.0) as u64;
+            entry.forks = v.get("forks_count").and_then(json::Json::as_f64).unwrap_or(0.0) as u64;
             entry.language = v.get("language").and_then(json::Json::as_str).unwrap_or("").to_string();
             if let Some(lic) = v.get("license") {
                 entry.license = lic.get("spdx_id").and_then(json::Json::as_str).unwrap_or("").to_string();

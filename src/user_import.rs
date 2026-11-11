@@ -21,6 +21,7 @@ pub struct UserRepo {
     pub owner: String,
     pub description: String,
     pub stars: u64,
+    pub forks: u64,
     pub language: String,
     pub license: String,
     pub topics: Vec<String>,
@@ -147,6 +148,7 @@ pub fn parse_user_repo(v: &Json) -> Option<UserRepo> {
             .get("stargazers_count")
             .and_then(Json::as_f64)
             .unwrap_or(0.0) as u64,
+        forks: v.get("forks_count").and_then(Json::as_f64).unwrap_or(0.0) as u64,
         language: v
             .get("language")
             .and_then(Json::as_str)
@@ -162,6 +164,12 @@ pub fn parse_user_repo(v: &Json) -> Option<UserRepo> {
     })
 }
 
+fn valid_account_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 39
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 /// Fetch every repo in a user's listing, following pagination (100 per
 /// page, at most 50 pages). Returns the repos and the number of API
 /// calls spent — one per page. An anonymous listing shows public repos
@@ -172,38 +180,66 @@ pub fn fetch_user_repos<F: Fetcher>(
     token: Option<&str>,
 ) -> Result<(Vec<UserRepo>, u32), String> {
     let username = username.trim().trim_start_matches('@');
-    if username.is_empty()
-        || username.len() > 39
-        || !username
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
+    if !valid_account_name(username) {
         return Err(format!("'{username}' does not look like a GitHub username"));
     }
+    fetch_listing(
+        fetcher,
+        &format!("users/{username}"),
+        &format!("GitHub user '{username}'"),
+        token,
+    )
+}
+
+/// Fetch an organization's repos the same way (the org endpoint lists
+/// repos of every member owner; ownership filters do not apply, only
+/// visibility, fork, and archived filters do).
+pub fn fetch_org_repos<F: Fetcher>(
+    fetcher: &F,
+    org: &str,
+    token: Option<&str>,
+) -> Result<(Vec<UserRepo>, u32), String> {
+    let org = org.trim().trim_start_matches('@');
+    if !valid_account_name(org) {
+        return Err(format!("'{org}' does not look like a GitHub organization"));
+    }
+    fetch_listing(
+        fetcher,
+        &format!("orgs/{org}"),
+        &format!("GitHub organization '{org}'"),
+        token,
+    )
+}
+
+fn fetch_listing<F: Fetcher>(
+    fetcher: &F,
+    path: &str,
+    label: &str,
+    token: Option<&str>,
+) -> Result<(Vec<UserRepo>, u32), String> {
     let mut all = Vec::new();
     let mut spent = 0u32;
     for page in 1..=50u32 {
-        let url = format!(
-            "https://api.github.com/users/{username}/repos?per_page=100&page={page}&sort=full_name"
-        );
+        let url =
+            format!("https://api.github.com/{path}/repos?per_page=100&page={page}&sort=full_name");
         let resp = get_retry(fetcher, &url, None, token)?;
         spent += 1;
         match resp.status {
             200 => {}
-            404 => return Err(format!("GitHub user '{username}' was not found")),
+            404 => return Err(format!("{label} was not found")),
             403 | 429 => {
                 return Err(
                     "GitHub rate limit reached — release checks via Atom are unaffected, and a token raises the limit"
                         .into(),
                 )
             }
-            other => return Err(format!("listing {username}'s repos answered HTTP {other}")),
+            other => return Err(format!("listing {label}'s repos answered HTTP {other}")),
         }
         let v = json::parse(&resp.body)
-            .map_err(|e| format!("{username}'s repo listing did not parse: {e}"))?;
+            .map_err(|e| format!("{label}'s repo listing did not parse: {e}"))?;
         let items = v
             .as_arr()
-            .ok_or_else(|| format!("{username}'s repo listing was not a list"))?;
+            .ok_or_else(|| format!("{label}'s repo listing was not a list"))?;
         let n = items.len();
         for item in items {
             if let Some(r) = parse_user_repo(item) {
@@ -251,6 +287,7 @@ pub fn apply_user_import(
             let mut e = RepoEntry::new(r.repo.clone());
             e.description = r.description.clone();
             e.stars = r.stars;
+            e.forks = r.forks;
             e.language = r.language.clone();
             e.license = r.license.clone();
             e.topics = r.topics.clone();
@@ -342,6 +379,24 @@ mod tests {
     }
 
     #[test]
+    fn fetch_org_repos_lists_member_owned_repos() {
+        let fake = PageFake {
+            pages: Mutex::new(HashMap::from([(
+                1,
+                listing(&[
+                    repo_json("my-org", "tool", ""),
+                    repo_json("a-member", "side", ""),
+                ]),
+            )])),
+            status: 200,
+        };
+        let (repos, spent) = fetch_org_repos(&fake, "my-org", None).unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(spent, 1);
+        assert_eq!(repos[1].owner, "a-member");
+    }
+
+    #[test]
     fn fetch_reports_unknown_users_and_bad_names() {
         let fake = PageFake {
             pages: Mutex::new(HashMap::new()),
@@ -360,6 +415,7 @@ mod tests {
 
     fn sample() -> Vec<UserRepo> {
         let mk = |full: &str, owner: &str, fork: bool, archived: bool, private: bool| UserRepo {
+            forks: 0,
             repo: RepoRef::parse(full).unwrap(),
             owner: owner.into(),
             description: String::new(),

@@ -39,3 +39,12 @@
 | Open on GitHub / download folder | — | — | yes | window commands (validated RepoRef / own layout) |
 | Check on start (setting) | yes (settings) | — | yes | Settings round-trip |
 | Saved searches in the window | yes | yes | yes | saved_list/save/delete commands |
+| Import an organization's projects | yes | yes | yes | user_import tests + live CLI run (tauri-apps: 114 listed) |
+| Shelf update (check + download) | yes | yes | yes | live CLI run (downloaded v0.5.0 via a shelf) |
+| Bulk select / shelf / check / remove | — | — | yes | window bulk commands |
+| Catalogue backup export/import | yes | yes (export --json) | yes | window commands (downloads-folder file) |
+| Release notes from the feed | yes | — | yes | atom body parse tests |
+| Fork counts | yes | yes (--json) | yes | metadata + import parse tests |
+| Download speed / ETA | — | — | yes | window queue sampling |
+| Tray presence + updates count | — | — | yes | window tray; runtime unverified |
+| Data-home fallback (LOCALAPPDATA) | — | — | yes | window choose_data_dir probe |

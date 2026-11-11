@@ -11,6 +11,9 @@ pub struct ReleaseNote {
     pub title: String,
     pub updated: String,
     pub link: String,
+    /// The release notes as plain text (the feed's HTML content with
+    /// tags stripped), empty when the release has no notes.
+    pub body: String,
 }
 
 /// Parse a releases/tags Atom document. Entries come back in feed order
@@ -45,9 +48,60 @@ pub fn parse_releases_atom(xml: &str) -> Vec<ReleaseNote> {
             title,
             updated,
             link,
+            body: content_text(entry),
         });
     }
     out
+}
+
+/// The entry's <content> (GitHub puts the release notes there as
+/// escaped HTML) reduced to readable plain text.
+fn content_text(entry: &str) -> String {
+    let Some(start) = entry.find("<content") else {
+        return String::new();
+    };
+    let Some(gt) = entry[start..].find('>') else {
+        return String::new();
+    };
+    let body_start = start + gt + 1;
+    let Some(end) = entry[body_start..].find("</content>") else {
+        return String::new();
+    };
+    let raw = unescape(&entry[body_start..body_start + end]);
+    // Strip tags but keep block structure: </p>, <br>, </li> become
+    // newlines before the tags go away.
+    let spaced = raw
+        .replace("</p>", "\n\n")
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</li>", "\n")
+        .replace("</h2>", "\n\n")
+        .replace("</h3>", "\n\n");
+    let mut text = String::with_capacity(spaced.len());
+    let mut in_tag = false;
+    for ch in spaced.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    // The feed escapes the HTML once, and the HTML escapes its own
+    // text again (& in a code sample arrives as &amp;amp;) — resolve
+    // the second level now that the tags are gone.
+    let text = unescape(&text);
+    // Tidy: trim each line, drop runs of blank lines, cap the length.
+    let mut lines: Vec<&str> = Vec::new();
+    for line in text.lines().map(|l| l.trim()) {
+        if line.is_empty() && (lines.is_empty() || lines.last() == Some(&"")) {
+            continue;
+        }
+        lines.push(line);
+    }
+    let joined = lines.join("\n").trim().to_string();
+    joined.chars().take(4000).collect()
 }
 
 fn tag_text(entry: &str, tag: &str) -> Option<String> {
@@ -95,6 +149,7 @@ mod tests {
     <updated>2026-11-01T00:00:00Z</updated>
     <link rel="alternate" type="text/html" href="https://github.com/o/r/releases/tag/v1.2.0"/>
     <title>v1.2.0 &amp; fixes</title>
+    <content type="html">&lt;p&gt;What is new&lt;/p&gt;&lt;ul&gt;&lt;li&gt;First thing&lt;/li&gt;&lt;li&gt;Second &amp;amp; final&lt;/li&gt;&lt;/ul&gt;</content>
   </entry>
   <entry>
     <updated>2026-10-01T00:00:00Z</updated>
@@ -111,6 +166,8 @@ mod tests {
         assert_eq!(notes[0].title, "v1.2.0 & fixes");
         assert_eq!(notes[0].updated, "2026-11-01T00:00:00Z");
         assert_eq!(notes[1].tag, "v1.1.0");
+        assert_eq!(notes[0].body, "What is new\n\nFirst thing\nSecond & final");
+        assert_eq!(notes[1].body, "", "no content element, no notes");
     }
 
     #[test]

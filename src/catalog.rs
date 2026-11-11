@@ -12,6 +12,8 @@ pub struct RepoEntry {
     pub repo: RepoRef,
     pub description: String,
     pub stars: u64,
+    /// Fork count from metadata (0 = not fetched yet).
+    pub forks: u64,
     pub language: String,
     pub license: String,
     pub topics: Vec<String>,
@@ -33,6 +35,7 @@ impl RepoEntry {
             repo,
             description: String::new(),
             stars: 0,
+            forks: 0,
             language: String::new(),
             license: String::new(),
             topics: Vec::new(),
@@ -60,6 +63,7 @@ impl RepoEntry {
             ("repo".into(), Json::Str(self.repo.full_name())),
             ("description".into(), Json::Str(self.description.clone())),
             ("stars".into(), Json::Num(self.stars as f64)),
+            ("forks".into(), Json::Num(self.forks as f64)),
             ("language".into(), Json::Str(self.language.clone())),
             ("license".into(), Json::Str(self.license.clone())),
             (
@@ -103,6 +107,7 @@ impl RepoEntry {
             .unwrap_or("")
             .into();
         e.stars = v.get("stars").and_then(Json::as_f64).unwrap_or(0.0) as u64;
+        e.forks = v.get("forks").and_then(Json::as_f64).unwrap_or(0.0) as u64;
         e.language = v
             .get("language")
             .and_then(Json::as_str)

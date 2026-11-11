@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.0 — 2026-11-11
+
+- The volume page checks its own repo when opened (one free Atom
+  call) and re-renders with the fresh tag, so its badges, Download
+  button, and asset list are never behind its own release history.
+- Fork counts are real: metadata refresh and account imports record
+  them, and the volume page shows ⑂ with the number instead of a dash.
+- Release history rows with notes get a Notes button that expands the
+  release's notes, read from the Atom feed's content — no API cost.
+- Catalogue Select mode: tick volumes in any layout, then Add to
+  shelf, Check selected, or Remove selected (armed) from the bulk bar.
+- `import-org` (CLI) and an Organization account type (window) import
+  an organization's projects with the same filters as user imports,
+  minus ownership (an org listing spans many owners).
+- Every shelf has an Update button (window) and the CLI gains
+  `shelf update <name>`: members are checked in parallel, then the
+  outdated ones download.
+- Acquisitions shows live transfer speed and estimated time left for
+  running downloads.
+- The Librarian screen backs the catalogue up to
+  `repostacks-catalogue-export.json` in the downloads folder and can
+  restore it (armed; the replaced catalogue stays on disk as a
+  backup file).
+- Closing the window parks RepoStacks in the system tray: the
+  Librarian keeps its schedule, the tray tooltip and window title
+  carry the waiting-updates count, and the tray menu opens the
+  window, checks for updates, or quits.
+- An installed copy whose program folder is not writable now keeps
+  its library in %LOCALAPPDATA%\RepoStacks\data instead of failing
+  to save; portable copies keep `data\` beside the exe as before.
+
 ## 0.5.0 — 2026-11-11
 - Asset rules suggest themselves: a volume page with no saved rules now
   fills the Asset rules box from the release's filename scheme — each

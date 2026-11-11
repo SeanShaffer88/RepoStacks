@@ -31,9 +31,16 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.5.0: asset rules suggest themselves from a release's filename scheme
-(the version becomes `*`, so the rule keeps matching future releases) on
-the volume page and in the CLI. Before that, v0.4.0 was a second
+v0.6.0: a ten-improvement slice. The volume page checks its own repo on
+open (never stale), shows the real fork count, and expands release notes
+from the feed. The catalogue gains a Select mode with bulk shelf, check,
+and remove actions; organizations import like users; each shelf has an
+Update button; downloads show speed and time remaining; the Librarian
+screen backs the catalogue up and restores it; closing the window parks
+the app in the system tray with an updates count; and an installed copy
+whose program folder is not writable keeps its library in
+%LOCALAPPDATA% instead. Before that, v0.5.0 made asset rules suggest
+themselves from a release's filename scheme. Before that, v0.4.0 was a second
 enhancement round — search negation and due-for-check
 filters, parallel metadata refresh, catalogue export, download-folder
 cleaning, window saved searches and column picker, Open on GitHub, and
@@ -59,6 +66,8 @@ Examples:
 repostacks-cli add rust-lang/rust
 repostacks-cli import-user SeanShaffer88 --dry-run
 repostacks-cli import-user SeanShaffer88 --sources
+repostacks-cli import-org rust-lang --sources
+repostacks-cli shelf update "Dev Tools"
 repostacks-cli find "lang:rust -topic:games is:due"
 repostacks-cli export > my-library.txt
 repostacks-cli clean

@@ -1,6 +1,6 @@
 [package]
 name = "repostacks-window"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 description = "RepoStacks window — the dark ledger over the RepoStacks core."
@@ -9,7 +9,7 @@ description = "RepoStacks window — the dark ledger over the RepoStacks core."
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 repostacks_core = { package = "repostacks", path = ".." }

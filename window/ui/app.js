@@ -13,6 +13,8 @@ const state = {
   view: { layout: "ledger", theme: "dark-ledger", density: "comfortable", group_by: "none", columns: [], show_facets: true },
   facetQuery: "",   // composed from facet checkboxes
   detailRepo: null,
+  selectMode: false,
+  selected: new Set(),
 };
 
 function toast(msg, isError) {
@@ -55,6 +57,16 @@ function statusBadge(e) {
 }
 function fmtStars(n) {
   return n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n);
+}
+function fmtBytes(n) {
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
+}
+function fmtEta(secs) {
+  if (secs >= 3600) return Math.round(secs / 3600) + "h";
+  if (secs >= 60) return Math.round(secs / 60) + "m";
+  return secs + "s";
 }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -146,6 +158,25 @@ function renderEntries() {
   }
   host.innerHTML = html;
   bindEntryOpen(host);
+  host.querySelectorAll("input[data-sel]").forEach((cb) =>
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.selected.add(cb.dataset.sel);
+      else state.selected.delete(cb.dataset.sel);
+      updateBulkBar();
+    }));
+}
+
+// The selection checkbox rendered on each entry while Select mode is
+// on. Clicks on it must not open the volume — bindEntryOpen guards.
+function selBox(e) {
+  if (!state.selectMode) return "";
+  const on = state.selected.has(e.full_name) ? " checked" : "";
+  return `<label class="selbox" title="Select ${esc(e.full_name)}"><input type="checkbox" data-sel="${esc(e.full_name)}"${on}></label>`;
+}
+
+function updateBulkBar() {
+  $("#bulk-bar").classList.toggle("hidden", !state.selectMode);
+  $("#bulk-count").textContent = state.selectMode ? `${state.selected.size} selected` : "";
 }
 
 const COLUMNS = {
@@ -164,9 +195,11 @@ const COLUMNS = {
 function renderLedger(members) {
   const cols = (state.view.columns.length ? state.view.columns : Object.keys(COLUMNS))
     .filter((c) => COLUMNS[c]);
-  let h = `<table class="ledger"><thead><tr>${cols.map((c) => `<th class="${COLUMNS[c].num ? "num" : ""}">${COLUMNS[c].head}</th>`).join("")}</tr></thead><tbody>`;
+  const selHead = state.selectMode ? `<th class="selcol"></th>` : "";
+  let h = `<table class="ledger"><thead><tr>${selHead}${cols.map((c) => `<th class="${COLUMNS[c].num ? "num" : ""}">${COLUMNS[c].head}</th>`).join("")}</tr></thead><tbody>`;
   for (const e of members) {
-    h += `<tr class="entry" data-repo="${esc(e.full_name)}">${cols.map((c) => `<td class="${COLUMNS[c].num ? "num" : ""}">${COLUMNS[c].cell(e)}</td>`).join("")}</tr>`;
+    const selCell = state.selectMode ? `<td class="selcol">${selBox(e)}</td>` : "";
+    h += `<tr class="entry" data-repo="${esc(e.full_name)}">${selCell}${cols.map((c) => `<td class="${COLUMNS[c].num ? "num" : ""}">${COLUMNS[c].cell(e)}</td>`).join("")}</tr>`;
   }
   return h + "</tbody></table>";
 }
@@ -174,7 +207,7 @@ function renderLedger(members) {
 function renderCards(members) {
   let h = `<div class="cards">`;
   for (const e of members) {
-    h += `<div class="card" data-repo="${esc(e.full_name)}">
+    h += `<div class="card" data-repo="${esc(e.full_name)}">${selBox(e)}
       <div class="cover" style="background:${coverColor(e.language, e.name)}"><span>${esc(e.language || "repo")}</span></div>
       <div class="name">${esc(e.name)}</div>
       <div class="owner">${esc(e.owner)}</div>
@@ -188,7 +221,7 @@ function renderCards(members) {
 
 function renderCompact(members) {
   return members.map((e) =>
-    `<div class="compact-row" data-repo="${esc(e.full_name)}"><strong>${esc(e.full_name)}</strong>
+    `<div class="compact-row" data-repo="${esc(e.full_name)}">${selBox(e)}<strong>${esc(e.full_name)}</strong>
      <span class="muted">${esc(e.language || "—")} · ★${fmtStars(e.stars)} · ${esc(e.latest_tag || "—")} · ${esc(e.status)}</span></div>`).join("");
 }
 
@@ -206,7 +239,7 @@ function renderDiagram(members) {
   for (const [zone, list] of [...map.entries()].sort()) {
     h += `<div class="zone"><h3>${esc(zone)}</h3><div class="minis">`;
     for (const e of list) {
-      h += `<div class="mini" data-repo="${esc(e.full_name)}">
+      h += `<div class="mini" data-repo="${esc(e.full_name)}">${selBox(e)}
         <div class="mini-head" style="background:${coverColor(e.language, e.name)}">${esc(e.full_name)}</div>
         <div class="mini-body">language ${esc(e.language || "—")} · license ${esc(e.license || "—")}<br>
         stars ${fmtStars(e.stars)} · release ${esc(e.latest_tag || "—")}<br>status ${esc(e.status)}</div></div>`;
@@ -263,6 +296,69 @@ $("#check-now").addEventListener("click", async () => {
   );
   refreshCatalogue();
 });
+// ---------- Bulk selection ----------
+$("#select-mode").addEventListener("click", () => {
+  state.selectMode = !state.selectMode;
+  const btn = $("#select-mode");
+  btn.setAttribute("aria-pressed", String(state.selectMode));
+  btn.textContent = state.selectMode ? "Selecting…" : "Select";
+  if (!state.selectMode) state.selected.clear();
+  updateBulkBar();
+  renderEntries();
+});
+$("#bulk-clear").addEventListener("click", () => {
+  state.selected.clear();
+  updateBulkBar();
+  renderEntries();
+});
+$("#bulk-to-shelf").addEventListener("click", async () => {
+  const shelf = $("#bulk-shelf").value.trim();
+  if (!shelf) { toast("Name the shelf first.", true); return; }
+  if (!state.selected.size) { toast("Select some volumes first.", true); return; }
+  const placed = await call("bulk_shelf_add", { shelf, repos: [...state.selected] });
+  toast(`Put ${placed} volume(s) on shelf “${shelf}”.`);
+  state.selected.clear();
+  updateBulkBar();
+  refreshCatalogue();
+});
+$("#bulk-check").addEventListener("click", async () => {
+  if (!state.selected.size) { toast("Select some volumes first.", true); return; }
+  toast(`Checking ${state.selected.size} volume(s) via Atom feeds…`);
+  const res = await call("check_repos", { repos: [...state.selected] });
+  const changed = res.filter((r) => r.changed).length;
+  const failed = res.filter((r) => r.error);
+  toast(
+    `Checked ${res.length} volume(s) — ${changed} new release(s).` +
+      (failed.length ? ` ${failed.length} failed: ${failed[0].repo} (${failed[0].error})` : ""),
+    failed.length > 0
+  );
+  refreshCatalogue();
+});
+$("#bulk-remove").addEventListener("click", async (ev) => {
+  if (!state.selected.size) { toast("Select some volumes first.", true); return; }
+  // Same arm-to-confirm pattern as the volume page's Remove.
+  const btn = ev.currentTarget;
+  if (btn.dataset.armed !== "1") {
+    btn.dataset.armed = "1";
+    btn.textContent = `Remove ${state.selected.size} — click again to confirm`;
+    setTimeout(() => {
+      if (btn.isConnected) {
+        btn.dataset.armed = "";
+        btn.textContent = "Remove selected";
+      }
+    }, 3500);
+    return;
+  }
+  btn.dataset.armed = "";
+  btn.textContent = "Remove selected";
+  const n = await call("bulk_remove", { repos: [...state.selected] });
+  state.selected.clear();
+  updateBulkBar();
+  toast(`Removed ${n} volume(s).`);
+  refreshFacets();
+  refreshCatalogue();
+});
+
 $("#refresh-meta").addEventListener("click", async () => {
   toast("Refreshing metadata…");
   const r = await call("refresh_all", { force: false });
@@ -349,7 +445,7 @@ $("#saved-delete").addEventListener("click", async () => {
 });
 
 // ---------- Detail ----------
-async function openDetail(fullName) {
+async function openDetail(fullName, skipAutoCheck) {
   state.detailRepo = fullName;
   const all = await call("find_entries", { query: "" });
   const e = all.find((x) => x.full_name.toLowerCase() === fullName.toLowerCase());
@@ -361,7 +457,7 @@ async function openDetail(fullName) {
       <div class="detail-cover" style="background:${coverColor(e.language, e.name)}"><span>${esc(e.language || "repo")}</span></div>
       <div>
         <h2>${esc(e.name)}</h2>
-        <div class="sub">${esc(e.full_name)} · ★ ${fmtStars(e.stars)} · ⑂ —</div>
+        <div class="sub">${esc(e.full_name)} · ★ ${fmtStars(e.stars)} · ⑂ ${e.forks ? fmtStars(e.forks) : "—"}</div>
         <p>${esc(e.description || "No description fetched yet — Refresh metadata fills this in.")}</p>
         <div class="sub">${esc(e.language || "—")} · ${esc(e.license || "—")}${e.topics.length ? " · " + esc(e.topics.join(", ")) : ""}</div>
         <div class="chips">${statusBadge(e)} ${e.installed_tag ? `<span class="chip">installed ${esc(e.installed_tag)}</span>` : ""} ${e.latest_tag ? `<span class="chip">latest ${esc(e.latest_tag)}</span>` : ""}</div>
@@ -441,13 +537,13 @@ async function openDetail(fullName) {
     toast(`Downloading ${e.full_name} ${e.latest_tag}…`);
     const path = await call("download_repo", { repo: e.full_name, tag: e.latest_tag || null });
     toast(`Downloaded → ${path}`);
-    openDetail(e.full_name);
+    openDetail(e.full_name, true);
   });
   $("#detail-check").addEventListener("click", async () => {
-    const res = await call("check_all");
+    const res = await call("check_repos", { repos: [e.full_name] });
     const mine = res.find((r) => r.repo.toLowerCase() === e.full_name.toLowerCase());
     if (mine && mine.error) toast(`${e.full_name}: ${mine.error}`, true);
-    openDetail(e.full_name);
+    openDetail(e.full_name, true);
   });
   $("#detail-github").addEventListener("click", () =>
     call("open_repo_page", { repo: e.full_name }));
@@ -475,10 +571,24 @@ async function openDetail(fullName) {
     toast("Volume removed.");
     showScreen("catalogue");
   });
+  // A volume page never shows stale release data: opening it checks
+  // just this repo (one free Atom call) and re-renders once if the
+  // newest tag moved.
+  if (!skipAutoCheck) {
+    const res = await call("check_repos", { repos: [e.full_name] }).catch(() => null);
+    const mine = res && res.find((r) => r.repo.toLowerCase() === e.full_name.toLowerCase());
+    if (mine && !mine.error && mine.latest && mine.latest !== e.latest_tag) {
+      return openDetail(e.full_name, true);
+    }
+  }
   if (e.latest_tag) {
     const hist = await call("release_history", { repo: e.full_name });
     $("#detail-history").innerHTML = hist.slice(0, 12).map((n, i) =>
-      `<div class="release-row"><span class="tag">${esc(n.tag)}</span><span class="muted">${esc(n.updated.slice(0, 10))}</span>${i === 0 ? '<span class="badge installed">latest</span>' : ""}<span>${esc(n.title !== n.tag ? n.title : "")}</span></div>`).join("") || '<span class="muted">No releases in the feed.</span>';
+      `<div class="release-row"><span class="tag">${esc(n.tag)}</span><span class="muted">${esc(n.updated.slice(0, 10))}</span>${i === 0 ? '<span class="badge installed">latest</span>' : ""}<span>${esc(n.title !== n.tag ? n.title : "")}</span>${n.body ? `<span class="spacer"></span><button class="small" data-notes="${i}">Notes</button>` : ""}</div>${n.body ? `<div class="release-notes hidden" id="notes-${i}">${esc(n.body)}</div>` : ""}`).join("") || '<span class="muted">No releases in the feed.</span>';
+    $$("#detail-history [data-notes]").forEach((b) => b.addEventListener("click", () => {
+      const box = $("#notes-" + b.dataset.notes);
+      if (box) box.classList.toggle("hidden");
+    }));
     const res = await call("release_assets", { repo: e.full_name, tag: e.latest_tag });
     $("#detail-assets").innerHTML = res.assets.map((a) =>
       `<div class="asset-row"><span>${esc(a.name)}</span><span class="muted">${(a.size / 1048576).toFixed(1)} MB</span>${a.name === res.pick ? '<span class="badge installed">auto-pick</span>' : ""}${a.digest ? '<span class="muted">sha256 ✓</span>' : ""}</div>`).join("") + `<div class="muted">Listing cost: ${res.quota} API call.${res.reason ? " Auto-pick: " + esc(res.reason) + "." : ""}</div>`;
@@ -498,11 +608,15 @@ async function openDetail(fullName) {
 // (Enter/Space), so the catalogue is fully usable without a mouse.
 function bindEntryOpen(host) {
   host.querySelectorAll("[data-repo]").forEach((el) => {
-    el.addEventListener("click", () => openDetail(el.dataset.repo));
+    el.addEventListener("click", (ev) => {
+      if (ev.target.closest(".selbox")) return; // selecting, not opening
+      openDetail(el.dataset.repo);
+    });
     el.tabIndex = 0;
     el.setAttribute("role", "link");
     el.setAttribute("aria-label", `Open ${el.dataset.repo}`);
     el.addEventListener("keydown", (ev) => {
+      if (ev.target.closest(".selbox")) return;
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
         openDetail(el.dataset.repo);
@@ -523,7 +637,7 @@ async function refreshShelves() {
   }
   host.innerHTML = data.map((s) => `
     <div class="shelf-section">
-      <h3>${esc(s.name)} <span class="muted">(${s.members.length})</span></h3>
+      <h3>${esc(s.name)} <span class="muted">(${s.members.length})</span> <button class="small" data-shelf-update="${esc(s.name)}">Update shelf</button></h3>
       <div class="shelf-plank"></div>
       <div class="spines">${s.members.map((m) => {
         const e = byName.get(m.toLowerCase());
@@ -535,6 +649,28 @@ async function refreshShelves() {
       }).join("")}</div>
     </div>`).join("");
   bindEntryOpen(host);
+  host.querySelectorAll("[data-shelf-update]").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.dataset.shelfUpdate;
+    const shelf = data.find((s) => s.name === name);
+    if (!shelf || !shelf.members.length) { toast(`Shelf “${name}” is empty.`); return; }
+    b.disabled = true;
+    toast(`Checking shelf “${name}” via Atom feeds…`);
+    await call("check_repos", { repos: shelf.members });
+    const fresh = await call("find_entries", { query: "" });
+    const due = shelf.members
+      .map((m) => fresh.find((x) => x.full_name.toLowerCase() === m.toLowerCase()))
+      .filter((e) => e && e.status === "Update available");
+    if (!due.length) {
+      toast(`Shelf “${name}” is current.`);
+      b.disabled = false;
+      refreshShelves();
+      return;
+    }
+    toast(`Updating ${due.length} volume(s) on “${name}”…`);
+    for (const e of due) await call("download_repo", { repo: e.full_name, tag: null });
+    toast(`Shelf “${name}” updated.`);
+    refreshShelves();
+  }));
 }
 
 // ---------- My Shelf ----------
@@ -582,7 +718,7 @@ async function refreshQueue() {
       <span class="tag">#${j.id}</span>
       <span><strong>${esc(j.repo)}</strong> ${esc(j.tag)} · ${esc(j.asset_name)}</span>
       <span class="bar" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${j.percent.toFixed(0)}"><div style="width:${j.percent.toFixed(0)}%"></div></span>
-      <span class="muted">${j.percent.toFixed(0)}% · ${(j.bytes_done / 1048576).toFixed(1)}/${(j.bytes_total / 1048576).toFixed(1)} MB</span>
+      <span class="muted">${j.percent.toFixed(0)}% · ${(j.bytes_done / 1048576).toFixed(1)}/${(j.bytes_total / 1048576).toFixed(1)} MB${j.speed_bps > 0 ? ` · ${fmtBytes(j.speed_bps)}/s${j.eta_secs > 0 ? ` · ~${fmtEta(j.eta_secs)} left` : ""}` : ""}</span>
       <span class="badge">${esc(j.status)}</span>
       ${j.error ? `<span class="muted">${esc(j.error)}</span>` : ""}
       ${j.status === "downloading" || j.status === "queued" ? `<button data-act="pause" data-id="${j.id}" title="Pause" aria-label="Pause job ${j.id}">⏸</button>` : ""}
@@ -655,6 +791,31 @@ $("#token-clear").addEventListener("click", async () => {
   await call("clear_token");
   toast("Token removed.");
   refreshLibrarian();
+});
+$("#backup-export").addEventListener("click", async () => {
+  const path = await call("export_catalog");
+  toast(`Catalogue exported → ${path}`);
+});
+$("#backup-import").addEventListener("click", async (ev) => {
+  // Replacing the whole catalogue arms first, like a removal.
+  const btn = ev.currentTarget;
+  if (btn.dataset.armed !== "1") {
+    btn.dataset.armed = "1";
+    btn.textContent = "Replace catalogue — click again to confirm";
+    setTimeout(() => {
+      if (btn.isConnected) {
+        btn.dataset.armed = "";
+        btn.textContent = "Import catalogue";
+      }
+    }, 3500);
+    return;
+  }
+  btn.dataset.armed = "";
+  btn.textContent = "Import catalogue";
+  const n = await call("import_catalog");
+  toast(`Imported a catalogue backup: ${n} volume(s).`);
+  refreshFacets();
+  refreshCatalogue();
 });
 $("#librarian-now").addEventListener("click", async () => {
   toast("The Librarian is making a pass…");
@@ -742,6 +903,7 @@ $("#add-go").addEventListener("click", async () => {
 function iuInput(dryRun) {
   return {
     username: $("#iu-name").value.trim(),
+    org: $("#iu-acct").value === "org",
     ownership: $("#iu-ownership").value,
     forks: $("#iu-forks").value,
     archived: $("#iu-archived").value,
@@ -749,10 +911,19 @@ function iuInput(dryRun) {
     dry_run: dryRun,
   };
 }
+$("#iu-acct").addEventListener("change", (ev) => {
+  const org = ev.target.value === "org";
+  // An org listing spans many owners, so the Whose filter doesn't apply.
+  $("#iu-ownership").disabled = org;
+  $("#iu-name-label").firstChild.textContent = org ? "GitHub organization " : "GitHub username ";
+  $("#iu-name").placeholder = org ? "e.g. rust-lang" : "e.g. SeanShaffer88";
+  $("#iu-go").disabled = true;
+  $("#iu-go").textContent = "Import";
+});
 $("#iu-preview").addEventListener("click", async () => {
   const name = $("#iu-name").value.trim();
   if (!name) {
-    $("#iu-report").textContent = "Type a GitHub username first.";
+    $("#iu-report").textContent = "Type a GitHub username or organization first.";
     return;
   }
   $("#iu-report").textContent = "Listing projects…";
