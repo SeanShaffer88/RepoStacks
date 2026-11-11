@@ -38,25 +38,28 @@ next. Screenshots will be added from a real run.
 
 ## Command line
 
-Every capability is a command first. Examples:
+Every capability is a command first. The command line ships as
+`repostacks-cli.exe` (it sits beside `RepoStacks.exe`; the two names
+differ only by letter case, which Windows treats as one filename).
+Examples:
 
 ```text
-repostacks add rust-lang/rust
-repostacks shelf add "Dev Tools" rust-lang/rust
-repostacks list
-repostacks search compiler
-repostacks facets
-repostacks feed-url rust-lang/rust
-repostacks check-feed releases.atom
-repostacks match "*-win64.zip" app-win64.zip app.dmg
-repostacks updates
-repostacks find "lang:rust stars:>10000 sort:stars"
-repostacks check-all
-repostacks refresh --all
-repostacks download casey/just
-repostacks update-all
-repostacks queue list
-repostacks view layout cards
+repostacks-cli add rust-lang/rust
+repostacks-cli shelf add "Dev Tools" rust-lang/rust
+repostacks-cli list
+repostacks-cli search compiler
+repostacks-cli facets
+repostacks-cli feed-url rust-lang/rust
+repostacks-cli check-feed releases.atom
+repostacks-cli match "*-win64.zip" app-win64.zip app.dmg
+repostacks-cli updates
+repostacks-cli find "lang:rust stars:>10000 sort:stars"
+repostacks-cli check-all
+repostacks-cli refresh --all
+repostacks-cli download casey/just
+repostacks-cli update-all
+repostacks-cli queue list
+repostacks-cli view layout cards
 ```
 
 The window is the same library on a desk: run `RepoStacks.exe`, or build it

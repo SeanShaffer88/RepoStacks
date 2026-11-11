@@ -1,6 +1,10 @@
 # Changelog
 
 ## 0.1.0 — 2026-11-10
+- Released as `RepoStacks-v0.1.0-x64-Setup.exe` + `RepoStacks-v0.1.0-x64-Portable.zip`
+  + `SHA256SUMS.txt`. The command line ships as `repostacks-cli.exe` so it can sit
+  beside `RepoStacks.exe` (the two names differ only by letter case, which Windows
+  treats as one filename).
 - Window slice: Tauri app with the dark ledger design (four layouts, four themes,
   faceted sidebar), Shelves / My Shelf / Acquisitions / book-page detail / Add Volumes
   screens, the Librarian scheduler with standing orders and activity log, DPAPI token
