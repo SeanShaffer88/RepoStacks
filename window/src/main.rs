@@ -4,25 +4,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod dpapi;
+mod single_instance;
 
 use repostacks_core::atom::parse_releases_atom;
 use repostacks_core::cache_policy::CachePolicy;
 use repostacks_core::catalog::Catalog;
+use repostacks_core::catalog::RepoEntry;
 use repostacks_core::download::{
     enqueue_download, plan_download, run_pending, suggest_asset_patterns,
 };
 use repostacks_core::http::{CurlDownloader, CurlFetcher, Fetcher};
-use repostacks_core::catalog::RepoEntry;
 use repostacks_core::net::{
     auth_for_token, check_entries_parallel, fetch_release_assets, refresh_entries_parallel,
     RefreshOutcome,
 };
 use repostacks_core::queue::{JobStatus, Queue};
+use repostacks_core::search::{execute as search_execute, Query};
 use repostacks_core::user_import::{
     apply_user_import, fetch_org_repos, fetch_user_repos, Archived, Forks, Ownership,
     UserRepoFilter, Visibility,
 };
-use repostacks_core::search::{execute as search_execute, Query};
 use repostacks_core::view::{status_of, Column, Density, GroupBy, Layout, Settings, Theme};
 use repostacks_core::RepoRef;
 use serde::Serialize;
@@ -39,6 +40,12 @@ struct Inner {
     last_metadata_run: u64,
     /// Last (bytes_done, instant) seen per job, for live speed/ETA.
     speed_samples: std::collections::HashMap<u64, (u64, std::time::Instant)>,
+    /// True while the background download worker is alive.
+    download_worker: bool,
+    /// Downloads asked for but not yet planned: (repo, tag if pinned).
+    pending_downloads: Vec<(RepoRef, Option<String>)>,
+    /// A "run the queue" request waiting for the worker.
+    pending_run: bool,
 }
 
 struct AppState {
@@ -368,8 +375,12 @@ fn import_catalog(state: State<'_, AppState>) -> Result<usize, String> {
     let mut inner = state.inner.lock().unwrap();
     let root = state.downloads_root(&inner.settings);
     let file = root.join("repostacks-catalogue-export.json");
-    let text = std::fs::read_to_string(&file)
-        .map_err(|e| format!("read {}: {e} — export a catalogue there first", file.display()))?;
+    let text = std::fs::read_to_string(&file).map_err(|e| {
+        format!(
+            "read {}: {e} — export a catalogue there first",
+            file.display()
+        )
+    })?;
     let parsed = repostacks_core::json::parse(&text)
         .map_err(|e| format!("{} did not parse: {e}", file.display()))?;
     let cat = Catalog::from_json(&parsed)
@@ -442,7 +453,11 @@ fn open_external(target: &str) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
         std::process::Command::new(opener)
             .arg(target)
             .spawn()
@@ -522,7 +537,10 @@ struct UserImportDto {
 /// state lock; the apply merges under it. `dry_run` previews the counts
 /// and adds nothing.
 #[tauri::command]
-fn import_user(state: State<'_, AppState>, input: UserImportDto) -> Result<serde_json::Value, String> {
+fn import_user(
+    state: State<'_, AppState>,
+    input: UserImportDto,
+) -> Result<serde_json::Value, String> {
     let filter = UserRepoFilter {
         ownership: match input.ownership.as_str() {
             "all" => Ownership::All,
@@ -709,7 +727,10 @@ fn check_impl(state: &AppState, only: Option<&[RepoRef]>) -> Result<Vec<CheckDto
         match &r.outcome {
             Ok(o) => {
                 if o.changed {
-                    log(&mut inner, format!("{}: new release {}", r.repo, o.latest_tag));
+                    log(
+                        &mut inner,
+                        format!("{}: new release {}", r.repo, o.latest_tag),
+                    );
                 }
                 out.push(CheckDto {
                     repo: r.repo.full_name(),
@@ -866,75 +887,235 @@ fn release_assets(
 
 // ---------- Download commands ----------
 
-fn run_queue_locked(state: &AppState, inner: &mut Inner) -> Vec<String> {
-    let token = state.token(inner);
-    let root = state.downloads_root(&inner.settings);
-    let downloader = CurlDownloader::default();
-    let concurrency = inner.settings.concurrency as usize;
-    let outcomes = run_pending(
-        &mut inner.queue,
-        &mut inner.catalog,
-        &downloader,
-        &root,
-        token.as_deref(),
-        concurrency,
-    );
-    let mut lines = Vec::new();
-    for o in &outcomes {
-        if o.status == JobStatus::Done {
-            log(inner, format!("Downloaded → {}", o.final_path.display()));
-            lines.push(format!("done: {}", o.final_path.display()));
-        } else {
-            log(inner, format!("Download failed: {}", o.error));
-            lines.push(format!("failed: {}", o.error));
+/// Ask the background download worker to pick up whatever is
+/// pending (specific download requests and/or runnable queue jobs).
+/// Downloads used to run under the state lock, which froze every
+/// other command for the length of a transfer; the worker plans and
+/// runs on snapshots instead, and merges its results back in brief
+/// locked sections. Spawns the worker when it is not already alive;
+/// the worker loops until nothing is pending, so a request made
+/// mid-run is picked up rather than lost.
+fn ensure_download_worker(state: &AppState, app: &AppHandle) {
+    {
+        let mut inner = state.inner.lock().unwrap();
+        if inner.download_worker {
+            return;
         }
+        inner.download_worker = true;
     }
-    let _ = state.save_queue(inner);
-    let _ = state.save_catalog(inner);
-    lines
+    let app = app.clone();
+    std::thread::spawn(move || download_worker_loop(&app));
+}
+
+fn download_worker_loop(app: &AppHandle) {
+    // A panicking worker must not wedge downloads for the rest of
+    // the session: reset the flag, re-queue anything it had marked
+    // Downloading, and say so in the log.
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| download_worker_run(app)));
+    if result.is_err() {
+        let state = app.state::<AppState>();
+        let mut inner = state.inner.lock().unwrap();
+        inner.download_worker = false;
+        for job in inner.queue.jobs.iter_mut() {
+            if job.status == JobStatus::Downloading {
+                job.status = JobStatus::Queued;
+            }
+        }
+        log(
+            &mut inner,
+            "Download worker stopped after an internal error; new downloads will restart it."
+                .into(),
+        );
+        let _ = state.save_queue(&inner);
+    }
+}
+
+fn download_worker_run(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    loop {
+        // Drain requests and snapshot everything the run needs.
+        let (requests, want_run, mut catalog, settings, token) = {
+            let mut inner = state.inner.lock().unwrap();
+            let token = state.token(&inner);
+            (
+                std::mem::take(&mut inner.pending_downloads),
+                std::mem::take(&mut inner.pending_run),
+                inner.catalog.clone(),
+                inner.settings.clone(),
+                token,
+            )
+        };
+        let root = state.downloads_root(&settings);
+        let mut work_queue = {
+            let inner = state.inner.lock().unwrap();
+            inner.queue.clone()
+        };
+        // Plan requested downloads without holding the lock (the
+        // asset fetch is a network call per repo).
+        let fetcher = CurlFetcher::default();
+        let mut notes: Vec<String> = Vec::new();
+        for (repo, tag) in &requests {
+            let Some(entry) = catalog.get(repo).cloned() else {
+                notes.push(format!("{repo}: not in the catalogue — download skipped"));
+                continue;
+            };
+            let tag = tag
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| entry.latest_tag.clone());
+            if tag.is_empty() {
+                notes.push(format!("{repo}: no tag known — check for releases first"));
+                continue;
+            }
+            match fetch_release_assets(&fetcher, repo, &tag, token.as_deref()) {
+                Ok((assets, _spent)) => {
+                    match enqueue_download(&mut work_queue, &entry, &tag, &assets, &root) {
+                        Ok(id) => notes.push(format!("Queued #{id}: {repo} {tag}")),
+                        Err(e) => notes.push(format!("{repo}: {e}")),
+                    }
+                }
+                Err(e) => notes.push(format!("{repo}: {e}")),
+            }
+        }
+        let has_runnable = work_queue
+            .jobs
+            .iter()
+            .any(|j| j.status == JobStatus::Queued);
+        if !want_run && !has_runnable {
+            // Nothing to transfer. File the planning notes, then
+            // stop — unless a request raced in while planning.
+            let mut inner = state.inner.lock().unwrap();
+            for n in notes {
+                log(&mut inner, n);
+            }
+            // A retry pressed mid-run re-queues a job without
+            // spawning a worker (this one was alive) — do not stop
+            // while runnable work is sitting in the live queue.
+            let queued_waiting = inner
+                .queue
+                .jobs
+                .iter()
+                .any(|j| j.status == JobStatus::Queued);
+            if inner.pending_downloads.is_empty() && !inner.pending_run && !queued_waiting {
+                inner.download_worker = false;
+                return;
+            }
+            continue;
+        }
+        // Mark the batch Downloading in the live queue, so the
+        // Acquisitions view can show live .part progress while the
+        // run works on its snapshot.
+        {
+            let mut inner = state.inner.lock().unwrap();
+            for job in work_queue
+                .jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Queued)
+            {
+                if let Some(live) = inner.queue.jobs.iter_mut().find(|j| j.id == job.id) {
+                    if live.status == JobStatus::Queued {
+                        live.status = JobStatus::Downloading;
+                    }
+                }
+            }
+        }
+        let downloader = CurlDownloader::default();
+        let outcomes = run_pending(
+            &mut work_queue,
+            &mut catalog,
+            &downloader,
+            &root,
+            token.as_deref(),
+            settings.concurrency as usize,
+        );
+        for o in &outcomes {
+            if o.status == JobStatus::Done {
+                notes.push(format!("Downloaded → {}", o.final_path.display()));
+            } else {
+                notes.push(format!("Download failed: {}", o.error));
+            }
+        }
+        // Merge back. The worker's job rows win for the ids it ran;
+        // jobs added while it worked survive untouched. Only
+        // installed_tag flows back into the live catalogue, so
+        // edits made during the run are preserved. Pause/cancel
+        // pressed mid-run apply to the live rows and are then
+        // superseded by the finished run's truth for its own batch.
+        {
+            let mut inner = state.inner.lock().unwrap();
+            for job in work_queue.jobs {
+                if let Some(live) = inner.queue.jobs.iter_mut().find(|j| j.id == job.id) {
+                    *live = job;
+                } else {
+                    inner.queue.jobs.push(job);
+                }
+            }
+            for entry in &catalog.entries {
+                if !entry.installed_tag.is_empty() {
+                    if let Some(live) = inner.catalog.get_mut(&entry.repo) {
+                        live.installed_tag = entry.installed_tag.clone();
+                    }
+                }
+            }
+            for n in notes {
+                log(&mut inner, n);
+            }
+            let _ = state.save_queue(&inner);
+            let _ = state.save_catalog(&inner);
+        }
+        update_presence(app);
+    }
 }
 
 #[tauri::command]
 fn download_repo(
     state: State<'_, AppState>,
+    app: AppHandle,
     repo: String,
     tag: Option<String>,
 ) -> Result<String, String> {
     let repo_ref = RepoRef::parse(&repo).map_err(|e| e.0)?;
-    let mut inner = state.inner.lock().unwrap();
-    let token = state.token(&inner);
-    let entry = inner
-        .catalog
-        .get(&repo_ref)
-        .ok_or_else(|| format!("{repo} is not in the catalogue"))?
-        .clone();
-    let tag = tag
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| entry.latest_tag.clone());
-    if tag.is_empty() {
-        return Err(format!(
-            "no tag known for {repo} — check for releases first"
-        ));
+    {
+        let mut inner = state.inner.lock().unwrap();
+        let entry = inner
+            .catalog
+            .get(&repo_ref)
+            .ok_or_else(|| format!("{repo} is not in the catalogue"))?;
+        let tag = tag
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| entry.latest_tag.clone());
+        if tag.is_empty() {
+            return Err(format!(
+                "no tag known for {repo} — check for releases first"
+            ));
+        }
+        log(&mut inner, format!("Download requested: {repo} {tag}"));
+        inner.pending_downloads.push((repo_ref, Some(tag)));
     }
-    let fetcher = CurlFetcher::default();
-    let (assets, _spent) = fetch_release_assets(&fetcher, &repo_ref, &tag, token.as_deref())?;
-    let root = state.downloads_root(&inner.settings);
-    let id = enqueue_download(&mut inner.queue, &entry, &tag, &assets, &root)?;
-    log(&mut inner, format!("Queued #{id}: {repo} {tag}"));
-    let lines = run_queue_locked(&state, &mut inner);
-    state.save_queue(&inner)?;
-    lines
-        .into_iter()
-        .find(|l| l.starts_with("done:"))
-        .ok_or_else(|| "download did not complete — see the queue".to_string())
+    ensure_download_worker(&state, &app);
+    Ok("Download running in the background — progress is in Acquisitions".into())
 }
 
 #[tauri::command]
 fn queue_list(state: State<'_, AppState>) -> Result<Vec<JobDto>, String> {
     let mut inner = state.inner.lock().unwrap();
+    let root = state.downloads_root(&inner.settings);
     // Snapshot the job fields first so the speed samples can be
     // updated while the DTOs are built.
-    let raw: Vec<(u64, String, String, String, JobStatus, u64, u64, f64, String)> = inner
+    let raw: Vec<(
+        u64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        JobStatus,
+        u64,
+        u64,
+        f64,
+        String,
+    )> = inner
         .queue
         .jobs
         .iter()
@@ -942,6 +1123,8 @@ fn queue_list(state: State<'_, AppState>) -> Result<Vec<JobDto>, String> {
             (
                 j.id,
                 j.repo.full_name(),
+                j.repo.owner.clone(),
+                j.repo.name.clone(),
                 j.tag.clone(),
                 j.asset_name.clone(),
                 j.status,
@@ -954,7 +1137,26 @@ fn queue_list(state: State<'_, AppState>) -> Result<Vec<JobDto>, String> {
         .collect();
     let now_i = std::time::Instant::now();
     let mut out = Vec::with_capacity(raw.len());
-    for (id, repo, tag, asset_name, status, done, total, percent, error) in raw {
+    for (id, repo, owner, name, tag, asset_name, status, done, total, mut percent, error) in raw {
+        // A Downloading job is being written by the background
+        // worker; its live byte count is the .part file's size.
+        let done = if status == JobStatus::Downloading {
+            let part = root
+                .join(format!("{owner}-{name}"))
+                .join(&tag)
+                .join(format!("{asset_name}.part"));
+            let live = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+            if live > done {
+                if total > 0 {
+                    percent = (live as f64 * 100.0 / total as f64).min(100.0);
+                }
+                live
+            } else {
+                done
+            }
+        } else {
+            done
+        };
         let (mut speed_bps, mut eta_secs) = (0u64, 0u64);
         if status == JobStatus::Downloading {
             if let Some(&(prev_bytes, prev_t)) = inner.speed_samples.get(&id) {
@@ -988,9 +1190,15 @@ fn queue_list(state: State<'_, AppState>) -> Result<Vec<JobDto>, String> {
 }
 
 #[tauri::command]
-fn queue_run(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    let mut inner = state.inner.lock().unwrap();
-    Ok(run_queue_locked(&state, &mut inner))
+fn queue_run(state: State<'_, AppState>, app: AppHandle) -> Result<Vec<String>, String> {
+    {
+        let mut inner = state.inner.lock().unwrap();
+        inner.pending_run = true;
+    }
+    ensure_download_worker(&state, &app);
+    Ok(vec![
+        "Downloads running in the background — progress below, live.".into(),
+    ])
 }
 
 #[tauri::command]
@@ -1024,13 +1232,18 @@ fn queue_cancel(state: State<'_, AppState>, id: u64) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn queue_retry(state: State<'_, AppState>, id: u64) -> Result<(), String> {
-    let mut inner = state.inner.lock().unwrap();
-    if inner.queue.retry(id) {
-        state.save_queue(&inner)
-    } else {
-        Err(format!("job {id} is not failed — only failed jobs retry"))
+fn queue_retry(state: State<'_, AppState>, app: AppHandle, id: u64) -> Result<(), String> {
+    {
+        let mut inner = state.inner.lock().unwrap();
+        if inner.queue.retry(id) {
+            state.save_queue(&inner)?;
+        } else {
+            return Err(format!("job {id} is not failed — only failed jobs retry"));
+        }
     }
+    // A retried job runs right away on the background worker.
+    ensure_download_worker(&state, &app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1170,7 +1383,7 @@ fn get_activity(state: State<'_, AppState>) -> Result<Vec<String>, String> {
 /// metadata refresh when due (policy-governed, quota reported). Network
 /// work runs on snapshots without the state lock; results merge back
 /// under it. Returns the activity lines the pass produced.
-fn librarian_pass(state: &AppState) -> Vec<String> {
+fn librarian_pass(state: &AppState, app: &AppHandle) -> Vec<String> {
     let before = {
         let inner = state.inner.lock().unwrap();
         inner.activity.len()
@@ -1203,7 +1416,10 @@ fn librarian_pass(state: &AppState) -> Vec<String> {
             }
             if let Ok(out) = &r.outcome {
                 if out.changed {
-                    log(&mut inner, format!("{}: new release {}", r.repo, out.latest_tag));
+                    log(
+                        &mut inner,
+                        format!("{}: new release {}", r.repo, out.latest_tag),
+                    );
                 }
                 if r.entry.auto_download
                     && !out.latest_tag.is_empty()
@@ -1237,11 +1453,19 @@ fn librarian_pass(state: &AppState) -> Vec<String> {
             }
         }
     }
+    // Standing-order downloads run on the background worker too —
+    // a Librarian pass must never freeze the window behind a long
+    // transfer.
+    if state
+        .inner
+        .lock()
+        .unwrap()
+        .queue
+        .jobs
+        .iter()
+        .any(|j| j.status == JobStatus::Queued)
     {
-        let mut inner = state.inner.lock().unwrap();
-        if !inner.queue.jobs.is_empty() {
-            let _ = run_queue_locked(state, &mut inner);
-        }
+        ensure_download_worker(state, app);
     }
     // Metadata refresh when due — the policy decides what is stale and
     // every call is accounted in the log line.
@@ -1299,7 +1523,7 @@ fn librarian_pass(state: &AppState) -> Vec<String> {
 
 #[tauri::command]
 fn librarian_now(state: State<'_, AppState>, app: AppHandle) -> Result<Vec<String>, String> {
-    let lines = librarian_pass(&state);
+    let lines = librarian_pass(&state, &app);
     update_presence(&app);
     Ok(lines)
 }
@@ -1319,14 +1543,15 @@ fn scheduler_loop(handle: AppHandle) {
             // A panicking pass must never kill the scheduler thread —
             // without it, the Librarian would silently stop forever.
             let lines = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                librarian_pass(&state)
+                librarian_pass(&state, &handle)
             })) {
                 Ok(lines) => lines,
                 Err(_) => {
                     let mut inner = state.inner.lock().unwrap();
                     log(
                         &mut inner,
-                        "Librarian pass hit an internal error; it will retry on the next interval.".into(),
+                        "Librarian pass hit an internal error; it will retry on the next interval."
+                            .into(),
                     );
                     let lines: Vec<String> = inner.activity.iter().rev().take(1).cloned().collect();
                     lines
@@ -1403,6 +1628,16 @@ fn update_presence(app: &AppHandle) {
 }
 
 fn main() {
+    // One instance per session: a second copy would share the data
+    // folder and last-writer-wins could drop edits. Step aside with
+    // an explanation before touching any state.
+    let _instance = match single_instance::acquire() {
+        Some(guard) => guard,
+        None => {
+            single_instance::notify_already_running();
+            return;
+        }
+    };
     let exe_dir = std::env::current_exe()
         .map(|p| p.parent().map(|d| d.to_path_buf()).unwrap_or_default())
         .unwrap_or_default();
@@ -1417,6 +1652,9 @@ fn main() {
             last_atom_run: 0,
             last_metadata_run: 0,
             speed_samples: std::collections::HashMap::new(),
+            download_worker: false,
+            pending_downloads: Vec::new(),
+            pending_run: false,
         }),
         data_dir,
         exe_dir,
@@ -1479,17 +1717,11 @@ fn main() {
                 let open_item =
                     MenuItem::with_id(app, "tray_open", "Open RepoStacks", true, None::<&str>)
                         .expect("tray menu");
-                let check_item = MenuItem::with_id(
-                    app,
-                    "tray_check",
-                    "Check for updates",
-                    true,
-                    None::<&str>,
-                )
-                .expect("tray menu");
-                let quit_item =
-                    MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)
+                let check_item =
+                    MenuItem::with_id(app, "tray_check", "Check for updates", true, None::<&str>)
                         .expect("tray menu");
+                let quit_item = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)
+                    .expect("tray menu");
                 let menu = Menu::with_items(app, &[&open_item, &check_item, &quit_item])
                     .expect("tray menu");
                 let mut builder = TrayIconBuilder::with_id("main")
@@ -1548,7 +1780,7 @@ fn main() {
                     let handle2 = handle.clone();
                     std::thread::spawn(move || {
                         let state = handle2.state::<AppState>();
-                        let lines = librarian_pass(&state);
+                        let lines = librarian_pass(&state, &handle2);
                         if !lines.is_empty() {
                             let _ = handle2.emit("librarian-activity", lines);
                         }

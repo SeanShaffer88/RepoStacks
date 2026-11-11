@@ -534,10 +534,8 @@ async function openDetail(fullName, skipAutoCheck) {
     }
   });
   $("#detail-download").addEventListener("click", async () => {
-    toast(`Downloading ${e.full_name} ${e.latest_tag}…`);
-    const path = await call("download_repo", { repo: e.full_name, tag: e.latest_tag || null });
-    toast(`Downloaded → ${path}`);
-    openDetail(e.full_name, true);
+    const msg = await call("download_repo", { repo: e.full_name, tag: e.latest_tag || null });
+    toast(msg);
   });
   $("#detail-check").addEventListener("click", async () => {
     const res = await call("check_repos", { repos: [e.full_name] });
@@ -668,7 +666,7 @@ async function refreshShelves() {
     }
     toast(`Updating ${due.length} volume(s) on “${name}”…`);
     for (const e of due) await call("download_repo", { repo: e.full_name, tag: null });
-    toast(`Shelf “${name}” updated.`);
+    toast(`Shelf “${name}” downloads are running in the background — progress in Acquisitions.`);
     refreshShelves();
   }));
 }
@@ -688,9 +686,8 @@ async function refreshMyShelf() {
     <h3 class="group-head">✔ Up to date (${current.length})</h3>
     ${current.map((e) => row(e, false)).join("") || '<div class="empty">Nothing installed yet.</div>'}`;
   $$("#myshelf-body [data-update]").forEach((b) => b.addEventListener("click", async () => {
-    toast(`Updating ${b.dataset.update}…`);
-    await call("download_repo", { repo: b.dataset.update, tag: null });
-    toast("Updated.");
+    const msg = await call("download_repo", { repo: b.dataset.update, tag: null });
+    toast(msg);
     refreshMyShelf();
   }));
 }
@@ -701,7 +698,7 @@ $("#update-all").addEventListener("click", async () => {
   for (const e of all) {
     await call("download_repo", { repo: e.full_name, tag: null });
   }
-  toast("All updates downloaded.");
+  toast("All updates are downloading in the background — progress in Acquisitions.");
   refreshMyShelf();
 });
 

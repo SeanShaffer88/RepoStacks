@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0 — 2026-11-11
+
+- One instance only: a second launch now steps aside with a short
+  explanation instead of sharing the data folder, where two copies'
+  saves would silently overwrite each other's edits (named-mutex
+  guard, no new dependencies).
+- Downloads run on a background worker: Download, Run queue, Retry,
+  shelf updates, and the Librarian's standing orders no longer hold
+  the app's state lock for the length of a transfer, so the window
+  stays responsive throughout — and Acquisitions shows live
+  progress, speed, and ETA from the partial file while a download
+  runs (previously the progress view could not even refresh during
+  a window-started run). Retried jobs now start on their own.
+
 ## 0.7.0 — 2026-11-11
 
 - Release checks degrade gracefully when a repo has no releases

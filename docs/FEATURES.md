@@ -59,6 +59,19 @@
 - Post-install steps remain out of scope by design (see ARCHITECTURE): the library
   downloads and verifies; it never runs anything it fetched.
 
+## Built (review batches 2–3, v0.8.0)
+- Single-instance guard: a named-mutex FFI module (dpapi-style, no
+  new crates); a second launch shows a short explanation and exits
+  before touching state.
+- Background download worker: commands register requests and return
+  immediately; the worker plans (asset fetch) and transfers on
+  snapshots, merges job results and installed tags back under brief
+  locks, preserves edits and jobs added mid-run, loops until no
+  work is pending, and recovers its own flag if it ever panics.
+  Acquisitions reads live .part sizes for running jobs, so progress,
+  speed, and ETA are genuinely live now. Queue retry starts the
+  worker on its own.
+
 ## Built (review batch 1, v0.7.0)
 - Graceful feed fallback: a repo with no releases feed is checked via
   its tags feed (free); a repo with neither costs one REST call,

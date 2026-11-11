@@ -31,7 +31,11 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.7.0: release checks degrade gracefully — a repo with no releases
+v0.8.0: one instance only (a second launch steps aside instead of
+fighting over the library), and downloads run on a background worker
+— the window stays responsive during transfers, with genuinely live
+progress in Acquisitions. Before that, v0.7.0 made release checks
+degrade gracefully — a repo with no releases
 feed is answered by its tags feed (still free), and only a repo with
 neither costs one reported API call, so tags-only projects check
 cleanly instead of erroring. Before that, v0.6.0 was a ten-improvement
