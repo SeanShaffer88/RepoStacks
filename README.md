@@ -31,7 +31,11 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.9.0: a standing API-usage meter — every REST call the app counts
+v0.10.0: a built-in benchmark — the CLI command `bench` times the
+core operations (catalogue save/load, search, facet counts, feed
+parsing, the release-check pipeline) over a synthetic 5,000-volume
+catalogue, with the recorded measurements in docs/PERFORMANCE.md.
+Before that, v0.9.0 added a standing API-usage meter — every REST call the app counts
 (metadata refreshes, asset lists, release-check fallbacks, imports)
 is recorded in a local ledger, shown by the CLI `usage` command and
 on the Librarian screen, split by purpose for this hour, today, and
