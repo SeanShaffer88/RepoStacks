@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — Unreleased
+## 0.1.0 — 2026-11-10
 - Window slice: Tauri app with the dark ledger design (four layouts, four themes,
   faceted sidebar), Shelves / My Shelf / Acquisitions / book-page detail / Add Volumes
   screens, the Librarian scheduler with standing orders and activity log, DPAPI token
