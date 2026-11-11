@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0 — 2026-11-11
+
+- A standing API-usage meter: every REST call RepoStacks counts —
+  metadata refreshes, release asset lists, release-check fallbacks,
+  and account imports — is recorded in a small local ledger
+  (`usage.json`, kept with the same backup-and-recovery discipline
+  as the other state files). The new CLI command `usage` prints the
+  current hour against the hourly limit, today (UTC), and lifetime
+  totals, each split by purpose, with `--json` for scripts; `doctor`
+  reports the ledger's health. The Librarian screen shows the same
+  meter with a bar. The meter is honest about what it is: it counts
+  this app's own calls only — it is not a live GitHub reading, and
+  the free Atom release checks are never counted.
+- CI and release workflows moved to `actions/checkout@v5` (the
+  Node 24 runtime), clearing the Node 20 deprecation warnings.
+
 ## 0.8.0 — 2026-11-11
 
 - One instance only: a second launch now steps aside with a short

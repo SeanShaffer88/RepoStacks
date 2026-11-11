@@ -146,14 +146,22 @@
 - **Interface**: catalogue sort control, keyboard shortcuts, screen-reader
   semantics, confirm-before-remove, and an empty-library call to action.
 
+## Built (API-usage meter slice, v0.9.0)
+- **Standing API-usage meter**: a persistent local ledger (`usage.json`,
+  schema-versioned, saved with the shared backup/quarantine recovery)
+  records every counted REST call by purpose — metadata refresh,
+  release asset lists, release-check fallback, account imports — with
+  current-hour, current-UTC-day, and lifetime totals. Hour and day
+  buckets roll over by the clock; lifetime totals remain. The CLI
+  command `usage` prints the meter (hour spent against the hourly
+  limit for the current mode — 60 anonymous / 5,000 with a token —
+  plus the reset time) and supports `--json`; `doctor` reports the
+  ledger's health. The window records the same events into the same
+  ledger shape in its data folder, and the Librarian screen shows the
+  meter with a bar and the by-purpose split. The meter counts only
+  this app's own calls — it is not a live GitHub reading, and free
+  Atom release checks are never recorded.
+
 ## Planned
-- API-usage meter fed by the cache policy's accounting on the Librarian screen
-  (spend is already reported per refresh; a standing meter is polish).
-- Tauri window over the core operations, built to the owner's eight screen concepts
-  (adapted): catalogue grid with faceted filter sidebar, shelf view, book-page repo
-  detail with release history and per-repo asset rules, acquisitions queue, dense table
-  with multi-select batch actions, My Shelf (installed/updates), bulk-import dialog,
-  Librarian dashboard. Default presentation is the dark ledger table.
-- Token storage via DPAPI in the window slice (never in the catalogue file).
-- Standing orders: auto-download per repo, Update All per shelf.
-- Release: Setup.exe + Portable.zip + SHA256SUMS.txt (x64).
+- Fresh README screenshots from the current user interface
+  (captures come from a real run; the existing ones predate v0.5.0).

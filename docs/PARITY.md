@@ -7,6 +7,7 @@
 | Faceted filter + facet counts | yes | yes | — | catalog tests |
 | Atom feed parse (releases/tags) | yes | yes (saved file) | — | atom tests |
 | Feed-missing fallback (tags feed → 1 REST call) | yes | yes | yes | net fallback tests + live run (torvalds/linux → v7.4-rc2) |
+| API-usage meter (counted REST calls by purpose) | yes | yes (`usage`) | yes (Librarian panel) | usage ledger tests; window runtime Unverified |
 | Single-instance guard | n/a | no | yes | window build; runtime Unverified |
 | Downloads off the state lock (background worker) | n/a (CLI is one-shot) | no | yes | window build; runtime Unverified |
 | Corrected rate-limit policy | yes | — | — | cache_policy tests |
