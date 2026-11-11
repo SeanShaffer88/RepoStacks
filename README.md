@@ -31,7 +31,11 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.6.0: a ten-improvement slice. The volume page checks its own repo on
+v0.7.0: release checks degrade gracefully — a repo with no releases
+feed is answered by its tags feed (still free), and only a repo with
+neither costs one reported API call, so tags-only projects check
+cleanly instead of erroring. Before that, v0.6.0 was a ten-improvement
+slice. The volume page checks its own repo on
 open (never stale), shows the real fork count, and expands release notes
 from the feed. The catalogue gains a Select mode with bulk shelf, check,
 and remove actions; organizations import like users; each shelf has an

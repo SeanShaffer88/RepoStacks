@@ -290,7 +290,7 @@ $("#check-now").addEventListener("click", async () => {
   // Failures are said out loud, not left in the log: name the count and
   // the first reason so a dead feed is visible at a glance.
   toast(
-    `Checked ${res.length} volume(s) — ${changed} new release(s). No API quota used.` +
+    `Checked ${res.length} volume(s) — ${changed} new release(s).` +
       (failed.length ? ` ${failed.length} failed: ${failed[0].repo} (${failed[0].error})` : ""),
     failed.length > 0
   );

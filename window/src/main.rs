@@ -678,7 +678,7 @@ fn check_impl(state: &AppState, only: Option<&[RepoRef]>) -> Result<Vec<CheckDto
     // Snapshot, then run the checks in parallel WITHOUT holding the
     // state lock — the rest of the app stays responsive while the
     // network works. Results merge back under the lock at the end.
-    let (entries, concurrency) = {
+    let (entries, concurrency, token) = {
         let inner = state.inner.lock().unwrap();
         let entries = match only {
             Some(want) => inner
@@ -690,11 +690,15 @@ fn check_impl(state: &AppState, only: Option<&[RepoRef]>) -> Result<Vec<CheckDto
                 .collect(),
             None => inner.catalog.entries.clone(),
         };
-        (entries, inner.settings.concurrency as usize)
+        (
+            entries,
+            inner.settings.concurrency as usize,
+            state.token(&inner),
+        )
     };
     let fetcher = CurlFetcher::default();
     let now = now_unix();
-    let results = check_entries_parallel(&fetcher, &entries, now, concurrency);
+    let results = check_entries_parallel(&fetcher, &entries, now, concurrency, token.as_deref());
     let mut inner = state.inner.lock().unwrap();
     let mut out = Vec::new();
     for r in &results {
@@ -722,17 +726,27 @@ fn check_impl(state: &AppState, only: Option<&[RepoRef]>) -> Result<Vec<CheckDto
             }),
         }
     }
+    let fallback_spent: u32 = results
+        .iter()
+        .filter_map(|r| r.outcome.as_ref().ok())
+        .map(|o| o.quota_spent)
+        .sum();
+    let quota_note = if fallback_spent == 0 {
+        "0 API calls".to_string()
+    } else {
+        format!("{fallback_spent} API call(s) — feed-less repos used the fallback")
+    };
     if only.is_none() {
         inner.last_atom_run = now;
         log(
             &mut inner,
-            "Checked all volumes via Atom feeds (0 API calls)".into(),
+            format!("Checked all volumes via Atom feeds ({quota_note})"),
         );
     } else {
         log(
             &mut inner,
             format!(
-                "Checked {} volume(s) via Atom feeds (0 API calls)",
+                "Checked {} volume(s) via Atom feeds ({quota_note})",
                 entries.len()
             ),
         );
@@ -1177,6 +1191,7 @@ fn librarian_pass(state: &AppState) -> Vec<String> {
         &entries,
         now,
         settings_snapshot.concurrency as usize,
+        token.as_deref(),
     );
     let mut to_download: Vec<(RepoRef, String)> = Vec::new();
     {

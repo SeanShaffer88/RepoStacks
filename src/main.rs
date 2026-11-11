@@ -412,11 +412,13 @@ fn run(args: &[String]) -> Result<(), String> {
                         .iter()
                         .filter_map(|r| cat.get(r).cloned())
                         .collect();
+                    let tok = token();
                     let results = check_entries_parallel(
                         &fetcher,
                         &snapshots,
                         now_unix(),
                         settings.concurrency as usize,
+                        tok.as_deref(),
                     );
                     let mut todo: Vec<RepoRef> = Vec::new();
                     for r in &results {
@@ -717,7 +719,8 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             let fetcher = CurlFetcher::default();
             let entry = cat.get_mut(&repo).expect("just added");
-            match check_releases(&fetcher, entry, now_unix()) {
+            let tok = token();
+            match check_releases(&fetcher, entry, now_unix(), tok.as_deref()) {
                 Ok(out) => {
                     let repo = entry.repo.clone();
                     let installed = entry.installed_tag.clone();
@@ -751,8 +754,14 @@ fn run(args: &[String]) -> Result<(), String> {
             let now = now_unix();
             // Checks run in parallel (bounded by the concurrency setting);
             // results merge back into the catalogue in catalogue order.
-            let results =
-                check_entries_parallel(&fetcher, &cat.entries, now, settings.concurrency as usize);
+            let tok = token();
+            let results = check_entries_parallel(
+                &fetcher,
+                &cat.entries,
+                now,
+                settings.concurrency as usize,
+                tok.as_deref(),
+            );
             let mut failures = 0;
             for r in &results {
                 if let Some(entry) = cat.get_mut(&r.repo) {
@@ -777,7 +786,18 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             cat.save(&path)
                 .map_err(|e| format!("save catalogue: {e}"))?;
-            println!("Release checks used no API quota (Atom feeds).");
+            let fallback_spent: u32 = results
+                .iter()
+                .filter_map(|r| r.outcome.as_ref().ok())
+                .map(|o| o.quota_spent)
+                .sum();
+            if fallback_spent == 0 {
+                println!("Release checks used no API quota (Atom feeds).");
+            } else {
+                println!(
+                    "Release checks rode Atom feeds; {fallback_spent} repo(s) had no feed and used the API fallback (1 call each)."
+                );
+            }
             if failures > 0 {
                 Err(format!("{failures} check(s) failed"))
             } else {
@@ -1027,9 +1047,10 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             let fetcher = CurlFetcher::default();
             let now = now_unix();
+            let tok = token();
             let (latest, installed) = {
                 let entry = cat.get_mut(&repo).expect("checked");
-                let out = check_releases(&fetcher, entry, now)?;
+                let out = check_releases(&fetcher, entry, now, tok.as_deref())?;
                 (out.latest_tag, entry.installed_tag.clone())
             };
             cat.save(&path)
@@ -1060,9 +1081,10 @@ fn run(args: &[String]) -> Result<(), String> {
             let now = now_unix();
             let repos: Vec<RepoRef> = cat.entries.iter().map(|e| e.repo.clone()).collect();
             let mut todo: Vec<RepoRef> = Vec::new();
+            let tok = token();
             for repo in repos {
                 let entry = cat.get_mut(&repo).expect("listed");
-                match check_releases(&fetcher, entry, now) {
+                match check_releases(&fetcher, entry, now, tok.as_deref()) {
                     Ok(out) => {
                         if !out.latest_tag.is_empty() && out.latest_tag != entry.installed_tag {
                             println!("{repo}: {} available.", out.latest_tag);
@@ -1431,7 +1453,7 @@ fn print_help() {
          view [layout|theme|density|group-by|columns|facets|reset]  Presentation settings\n  \
          feed-url <owner/repo>     Print the releases Atom feed URL (quota-free checks)\n  \
          check-feed <file.atom>    Read a saved Atom feed and list its releases\n  \
-         check <owner/repo>        Live release check over Atom (no API quota)\n  \
+         check <owner/repo>        Live release check over Atom (1 API call only when a repo has no feed)\n  \
          check-all                 Live release check for the whole catalogue\n  \
          refresh <repo|--all> [--force]  Refresh metadata under the cache policy\n  \
          match <glob> <asset>...   Test an asset-selection rule\n  \

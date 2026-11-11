@@ -59,6 +59,12 @@
 - Post-install steps remain out of scope by design (see ARCHITECTURE): the library
   downloads and verifies; it never runs anything it fetched.
 
+## Built (review batch 1, v0.7.0)
+- Graceful feed fallback: a repo with no releases feed is checked via
+  its tags feed (free); a repo with neither costs one REST call,
+  counted and reported — never silent. Tags-only projects check
+  cleanly instead of erroring every pass.
+
 ## Built (ten-improvement slice, v0.6.0)
 - Volume page freshness: opening a volume checks that repo alone (free
   Atom call) and re-renders with the fresh tag when it moved.

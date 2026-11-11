@@ -3,7 +3,9 @@
 //!
 //! Quota accounting is explicit: every operation reports how many REST
 //! units it spent under the current policy, so callers (and users) can see
-//! the budget. Atom checks always spend zero.
+//! the budget. Atom checks spend zero; when a repo has no releases feed,
+//! the check degrades gracefully — tags feed first (still free), then a
+//! single REST call, reported in `CheckOutcome::quota_spent`.
 
 use crate::atom::parse_releases_atom;
 use crate::cache_policy::{Auth, CachePolicy};
@@ -40,38 +42,106 @@ pub fn check_releases<F: Fetcher>(
     fetcher: &F,
     entry: &mut RepoEntry,
     now_unix: u64,
+    token: Option<&str>,
 ) -> Result<CheckOutcome, String> {
     let url = entry.repo.releases_atom_url();
     let resp = get_retry(fetcher, &url, None, None)?;
-    if resp.status == 404 {
-        return Err(format!(
-            "{} has no releases feed (the repo may publish tags only, or not exist)",
-            entry.repo
-        ));
+    match resp.status {
+        200 => {
+            let notes = parse_releases_atom(&resp.body);
+            let (tag, title) = notes
+                .first()
+                .map(|n| (n.tag.clone(), n.title.clone()))
+                .unwrap_or_default();
+            Ok(finish_check(entry, tag, title, notes.len(), 0, now_unix))
+        }
+        404 => check_fallback(fetcher, entry, now_unix, token),
+        other => Err(format!("feed for {} answered HTTP {other}", entry.repo)),
     }
-    if resp.status != 200 {
-        return Err(format!(
-            "feed for {} answered HTTP {}",
-            entry.repo, resp.status
-        ));
-    }
-    let notes = parse_releases_atom(&resp.body);
-    let (tag, title) = notes
-        .first()
-        .map(|n| (n.tag.clone(), n.title.clone()))
-        .unwrap_or_default();
+}
+
+fn finish_check(
+    entry: &mut RepoEntry,
+    tag: String,
+    title: String,
+    release_count: usize,
+    quota_spent: u32,
+    now_unix: u64,
+) -> CheckOutcome {
     let changed = !tag.is_empty() && tag != entry.latest_tag;
     if !tag.is_empty() {
         entry.latest_tag = tag.clone();
     }
     entry.last_release_check = now_unix;
-    Ok(CheckOutcome {
+    CheckOutcome {
         latest_tag: tag,
         latest_title: title,
-        release_count: notes.len(),
+        release_count,
         changed,
-        quota_spent: 0,
-    })
+        quota_spent,
+    }
+}
+
+/// Graceful degradation when a repo has no releases feed (tags-only
+/// projects, releases disabled): the tags feed answers first — still
+/// quota-free — and only a repo with neither feed costs one REST call
+/// for its latest release. A repo missing everywhere gets the plain
+/// explanation, and a rate-limited fallback says so.
+fn check_fallback<F: Fetcher>(
+    fetcher: &F,
+    entry: &mut RepoEntry,
+    now_unix: u64,
+    token: Option<&str>,
+) -> Result<CheckOutcome, String> {
+    if let Ok(resp) = get_retry(fetcher, &entry.repo.tags_atom_url(), None, None) {
+        if resp.status == 200 {
+            let notes = parse_releases_atom(&resp.body);
+            if let Some(first) = notes.first() {
+                let tag = first.tag.clone();
+                let title = if first.title.is_empty() {
+                    tag.clone()
+                } else {
+                    first.title.clone()
+                };
+                return Ok(finish_check(entry, tag, title, notes.len(), 0, now_unix));
+            }
+        }
+    }
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        entry.repo.full_name()
+    );
+    let resp = get_retry(fetcher, &url, None, token)?;
+    match resp.status {
+        200 => {
+            let v = json::parse(&resp.body).map_err(|e| {
+                format!("latest release for {} did not parse: {e}", entry.repo)
+            })?;
+            let tag = v
+                .get("tag_name")
+                .and_then(json::Json::as_str)
+                .unwrap_or("")
+                .to_string();
+            let title = v
+                .get("name")
+                .and_then(json::Json::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok(finish_check(entry, tag, title, 1, 1, now_unix))
+        }
+        404 => Err(format!(
+            "{} has no releases feed (the repo may publish tags only, or not exist)",
+            entry.repo
+        )),
+        403 | 429 => Err(
+            "GitHub rate limit reached — release checks via Atom are unaffected, and a token raises the limit"
+                .into(),
+        ),
+        other => Err(format!(
+            "latest release for {} answered HTTP {other}",
+            entry.repo
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +228,7 @@ pub fn check_entries_parallel<F: Fetcher + Sync>(
     entries: &[RepoEntry],
     now_unix: u64,
     concurrency: usize,
+    token: Option<&str>,
 ) -> Vec<ParallelCheck> {
     let stride = concurrency.max(1);
     let mut out = Vec::with_capacity(entries.len());
@@ -168,7 +239,7 @@ pub fn check_entries_parallel<F: Fetcher + Sync>(
                 .map(|e| {
                     scope.spawn(move || {
                         let mut entry = e.clone();
-                        let outcome = check_releases(fetcher, &mut entry, now_unix);
+                        let outcome = check_releases(fetcher, &mut entry, now_unix, token);
                         ParallelCheck {
                             repo: entry.repo.clone(),
                             outcome,
@@ -290,7 +361,7 @@ mod tests {
             body: FEED.into(),
         }]);
         let mut e = entry();
-        let out = check_releases(&fake, &mut e, 500).unwrap();
+        let out = check_releases(&fake, &mut e, 500, None).unwrap();
         assert!(out.changed);
         assert_eq!(out.quota_spent, 0);
         assert_eq!(e.latest_tag, "v2");
@@ -301,8 +372,53 @@ mod tests {
             etag: String::new(),
             body: FEED.into(),
         }]);
-        let out2 = check_releases(&fake2, &mut e, 600).unwrap();
+        let out2 = check_releases(&fake2, &mut e, 600, None).unwrap();
         assert!(!out2.changed);
+    }
+
+    fn resp(status: u16, body: &str) -> FetchResponse {
+        FetchResponse {
+            status,
+            etag: String::new(),
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn missing_releases_feed_falls_back_to_tags_for_free() {
+        let tags = "<feed><entry><updated>2026-11-01T00:00:00Z</updated><link rel=\"alternate\" href=\"https://github.com/o/r/releases/tag/v9\"/><title>Release v9</title></entry></feed>";
+        let fake = Fake::new(vec![resp(404, ""), resp(200, tags)]);
+        let mut e = entry();
+        let out = check_releases(&fake, &mut e, 500, None).unwrap();
+        assert_eq!(out.latest_tag, "v9");
+        assert_eq!(out.latest_title, "Release v9");
+        assert_eq!(out.quota_spent, 0, "the tags feed is still free");
+        assert_eq!(e.latest_tag, "v9");
+    }
+
+    #[test]
+    fn missing_feeds_fall_back_to_one_rest_call() {
+        let fake = Fake::new(vec![
+            resp(404, ""),
+            resp(404, ""),
+            resp(200, r#"{"tag_name":"v3","name":"Three"}"#),
+        ]);
+        let mut e = entry();
+        let out = check_releases(&fake, &mut e, 500, None).unwrap();
+        assert_eq!(out.latest_tag, "v3");
+        assert_eq!(out.latest_title, "Three");
+        assert_eq!(out.quota_spent, 1, "the fallback call is reported");
+    }
+
+    #[test]
+    fn missing_everywhere_reports_no_feed_and_rate_limits() {
+        let fake = Fake::new(vec![resp(404, ""), resp(404, ""), resp(404, "")]);
+        let mut e = entry();
+        let err = check_releases(&fake, &mut e, 500, None).unwrap_err();
+        assert!(err.contains("no releases feed"), "{err}");
+        let fake = Fake::new(vec![resp(404, ""), resp(404, ""), resp(403, "")]);
+        let err = check_releases(&fake, &mut e, 500, None).unwrap_err();
+        assert!(err.contains("rate limit"), "{err}");
     }
 
     #[test]
@@ -373,7 +489,7 @@ mod tests {
             attempts: std::sync::Mutex::new(0),
         };
         let mut e = entry();
-        let out = check_releases(&fake, &mut e, 700).unwrap();
+        let out = check_releases(&fake, &mut e, 700, None).unwrap();
         assert!(out.changed);
         assert_eq!(*fake.attempts.lock().unwrap(), 2);
     }
@@ -416,7 +532,7 @@ mod tests {
         let fake = MapFake {
             by_url: std::sync::Mutex::new(by_url),
         };
-        let results = check_entries_parallel(&fake, &entries, 900, 2);
+        let results = check_entries_parallel(&fake, &entries, 900, 2, None);
         assert_eq!(results.len(), 3);
         for (i, name) in ["a/one", "b/two", "c/three"].iter().enumerate() {
             assert_eq!(results[i].repo.full_name(), *name);

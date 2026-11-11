@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0 — 2026-11-11
+
+- Release checks degrade gracefully when a repo has no releases
+  feed (the project's standing rule): the tags feed answers first —
+  still quota-free — and only a repo with neither feed costs one
+  REST call, which is counted and reported in the activity log and
+  CLI output instead of being hidden. Tags-only projects (for
+  example torvalds/linux) now check successfully instead of
+  erroring on every pass.
+- QUALITY.md brought up to date with six releases of evidence (it
+  still described the foundation slice).
+
 ## 0.6.0 — 2026-11-11
 
 - The volume page checks its own repo when opened (one free Atom
