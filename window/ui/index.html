@@ -192,6 +192,15 @@
         system tray, where the Librarian keeps its schedule and the icon
         tells you how many updates are waiting. Quit from the tray menu.</p>
       </div>
+      <div class="panel">
+        <h3>API usage</h3>
+        <div class="bar"><div id="usage-bar-fill" style="width:0%"></div></div>
+        <p id="usage-text" class="note">Counting the REST calls RepoStacks itself makes…</p>
+        <div id="usage-kinds" class="note"></div>
+        <p class="note">This meter counts only RepoStacks' own calls —
+        it is not a live GitHub reading, and release checks over Atom
+        feeds are free and never counted.</p>
+      </div>
       <div class="panel wide">
         <h3>Activity</h3>
         <div id="activity-log"></div>

@@ -762,6 +762,20 @@ async function refreshLibrarian() {
     : "No token stored — anonymous mode, API budget 60/hour. Release checks are free either way.";
   const lines = await call("get_activity");
   $("#activity-log").innerHTML = lines.slice().reverse().map((l) => `<div>${esc(l)}</div>`).join("");
+  const u = await call("get_usage").catch(() => null);
+  if (u) {
+    $("#usage-bar-fill").style.width = `${Math.min(100, u.hour_percent)}%`;
+    const reset = new Date(u.hour_reset_unix * 1000);
+    const resetTxt = `${String(reset.getUTCHours()).padStart(2, "0")}:${String(reset.getUTCMinutes()).padStart(2, "0")} UTC`;
+    $("#usage-text").textContent =
+      `This hour: ${u.hour_spent} of ${u.hourly_limit} call(s) (${Math.round(u.hour_percent)}%), window resets ${resetTxt}. ` +
+      `Today (UTC): ${u.day_spent}. Lifetime: ${u.lifetime_spent}.`;
+    const kinds = (u.kinds || [])
+      .filter((k) => k.lifetime > 0)
+      .map((k) => `${esc(k.label)}: ${k.hour} this hour, ${k.day} today, ${k.lifetime} lifetime`)
+      .join("<br>");
+    $("#usage-kinds").innerHTML = kinds || "No counted REST calls yet.";
+  }
 }
 $("#cfg-save").addEventListener("click", async () => {
   await call("set_config", {
