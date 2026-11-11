@@ -132,6 +132,19 @@ impl Queue {
         }
     }
 
+    /// Requeue a failed job, clearing its error. The `.part` file (if the
+    /// failure left one) makes the retry resume instead of restarting.
+    pub fn retry(&mut self, id: u64) -> bool {
+        match self.get_mut(id) {
+            Some(j) if j.status == JobStatus::Failed => {
+                j.status = JobStatus::Queued;
+                j.error.clear();
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn active_count(&self) -> usize {
         self.jobs.iter().filter(|j| j.is_active()).count()
     }
@@ -181,23 +194,14 @@ impl Queue {
     }
 
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, self.to_json().to_string_pretty())?;
-        std::fs::rename(&tmp, path)
+        crate::persist::save_atomic(path, &self.to_json().to_string_pretty())
     }
 
     pub fn load(path: &std::path::Path) -> Result<Queue, String> {
-        if !path.exists() {
-            return Ok(Queue::default());
-        }
-        let text = std::fs::read_to_string(path).map_err(|e| format!("read queue: {e}"))?;
-        let v = crate::json::parse(&text).map_err(|e| format!("parse queue: {e}"))?;
-        Queue::from_json(&v)
+        crate::persist::load_recovering(path, |text| {
+            let v = crate::json::parse(text).map_err(|e| format!("parse queue: {e}"))?;
+            Queue::from_json(&v)
+        })
     }
 }
 
@@ -308,6 +312,27 @@ mod tests {
         assert!(q.cancel(id));
         assert!(!q.resume(id), "cancelled jobs cannot resume");
         assert_eq!(q.active_count(), 0);
+    }
+
+    #[test]
+    fn failed_jobs_retry_and_clear_their_error() {
+        let mut q = Queue::default();
+        let id = q.enqueue(
+            RepoRef::parse("o/r").unwrap(),
+            "v1",
+            "a.zip",
+            "https://x/a.zip",
+        );
+        {
+            let j = q.get_mut(id).unwrap();
+            j.status = JobStatus::Failed;
+            j.error = "boom".into();
+        }
+        assert!(q.retry(id));
+        let j = &q.jobs[0];
+        assert_eq!(j.status, JobStatus::Queued);
+        assert!(j.error.is_empty());
+        assert!(!q.retry(id), "only failed jobs retry");
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub struct RepoEntry {
     pub last_metadata_fetch: u64,
     pub last_release_check: u64,
     pub etag: String,
+    /// When the volume entered the catalogue (unix seconds; 0 = unknown,
+    /// e.g. entries written before this field existed).
+    pub added_unix: u64,
 }
 
 impl RepoEntry {
@@ -40,6 +43,7 @@ impl RepoEntry {
             last_metadata_fetch: 0,
             last_release_check: 0,
             etag: String::new(),
+            added_unix: 0,
         }
     }
 
@@ -51,7 +55,7 @@ impl RepoEntry {
         self.is_installed() && !self.latest_tag.is_empty() && self.latest_tag != self.installed_tag
     }
 
-    fn to_json(&self) -> Json {
+    pub fn to_json(&self) -> Json {
         Json::Obj(vec![
             ("repo".into(), Json::Str(self.repo.full_name())),
             ("description".into(), Json::Str(self.description.clone())),
@@ -86,6 +90,7 @@ impl RepoEntry {
                 Json::Num(self.last_release_check as f64),
             ),
             ("etag".into(), Json::Str(self.etag.clone())),
+            ("added_unix".into(), Json::Num(self.added_unix as f64)),
         ])
     }
 
@@ -141,6 +146,7 @@ impl RepoEntry {
             .and_then(Json::as_f64)
             .unwrap_or(0.0) as u64;
         e.etag = v.get("etag").and_then(Json::as_str).unwrap_or("").into();
+        e.added_unix = v.get("added_unix").and_then(Json::as_f64).unwrap_or(0.0) as u64;
         Some(e)
     }
 }
@@ -170,13 +176,22 @@ pub struct Filter {
     pub with_releases_only: bool,
 }
 
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 impl Catalog {
     /// Add a repo; returns false when it was already catalogued.
     pub fn add(&mut self, repo: RepoRef) -> bool {
         if self.get(&repo).is_some() {
             return false;
         }
-        self.entries.push(RepoEntry::new(repo));
+        let mut entry = RepoEntry::new(repo);
+        entry.added_unix = now_unix();
+        self.entries.push(entry);
         true
     }
 
@@ -309,6 +324,20 @@ impl Catalog {
         count_facets(self.entries.iter().flat_map(|e| e.topics.clone()))
     }
 
+    pub fn license_facets(&self) -> Vec<(String, usize)> {
+        count_facets(self.entries.iter().filter_map(|e| {
+            if e.license.is_empty() {
+                None
+            } else {
+                Some(e.license.clone())
+            }
+        }))
+    }
+
+    pub fn owner_facets(&self) -> Vec<(String, usize)> {
+        count_facets(self.entries.iter().map(|e| e.repo.owner.clone()))
+    }
+
     pub fn updates_available(&self) -> Vec<&RepoEntry> {
         self.entries
             .iter()
@@ -376,25 +405,14 @@ impl Catalog {
     }
 
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let text = self.to_json().to_string_pretty();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        // Atomic write: a crash mid-save must never lose the catalogue.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)
+        crate::persist::save_atomic(path, &self.to_json().to_string_pretty())
     }
 
     pub fn load(path: &std::path::Path) -> Result<Catalog, String> {
-        if !path.exists() {
-            return Ok(Catalog::default());
-        }
-        let text = std::fs::read_to_string(path).map_err(|e| format!("read catalogue: {e}"))?;
-        let v = crate::json::parse(&text).map_err(|e| format!("parse catalogue: {e}"))?;
-        Catalog::from_json(&v)
+        crate::persist::load_recovering(path, |text| {
+            let v = crate::json::parse(text).map_err(|e| format!("parse catalogue: {e}"))?;
+            Catalog::from_json(&v)
+        })
     }
 }
 
@@ -467,6 +485,26 @@ mod tests {
         );
         assert_eq!(c.language_facets(), vec![("Rust".to_string(), 1)]);
         assert_eq!(c.updates_available().len(), 1);
+    }
+
+    #[test]
+    fn owner_and_license_facets_and_added_stamp() {
+        let mut c = cat();
+        let e = c
+            .get_mut(&RepoRef::parse("rust-lang/rust").unwrap())
+            .unwrap();
+        e.license = "MIT".into();
+        e.added_unix = 1234;
+        assert_eq!(c.license_facets(), vec![("MIT".to_string(), 1)]);
+        assert_eq!(c.owner_facets().len(), 2);
+        // added_unix survives the JSON round trip; old files default to 0.
+        let text = c.to_json().to_string_pretty();
+        let back = Catalog::from_json(&crate::json::parse(&text).unwrap()).unwrap();
+        assert_eq!(back.entries[0].added_unix, 1234);
+        let old =
+            crate::json::parse("{\"schema_version\":1,\"repos\":[{\"repo\":\"a/b\"}]}").unwrap();
+        let back_old = Catalog::from_json(&old).unwrap();
+        assert_eq!(back_old.entries[0].added_unix, 0);
     }
 
     #[test]

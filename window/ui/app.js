@@ -8,6 +8,8 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 const state = {
   screen: "catalogue",
   entries: [],
+  volumes: 0,       // total catalogue size, for empty-state wording
+  sort: localStorage.getItem("repostacks-sort") || "",
   view: { layout: "ledger", theme: "dark-ledger", density: "comfortable", group_by: "none", columns: [], show_facets: true },
   facetQuery: "",   // composed from facet checkboxes
   detailRepo: null,
@@ -61,7 +63,12 @@ function esc(s) {
 // ---------- Navigation ----------
 function showScreen(name) {
   state.screen = name;
-  $$("#main-nav button").forEach((b) => b.classList.toggle("active", b.dataset.screen === name));
+  $$("#main-nav button").forEach((b) => {
+    const active = b.dataset.screen === name;
+    b.classList.toggle("active", active);
+    if (active) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
   ["catalogue", "detail", "shelves", "myshelf", "acquisitions", "librarian"].forEach((s) => {
     $("#screen-" + s).classList.toggle("hidden", s !== name);
   });
@@ -76,15 +83,27 @@ $$("#main-nav button").forEach((b) => b.addEventListener("click", () => showScre
 // ---------- Catalogue ----------
 function currentQuery() {
   const parts = [$("#global-search").value.trim(), state.facetQuery].filter(Boolean);
-  return parts.join(" ");
+  const joined = parts.join(" ");
+  // The toolbar sort applies unless the typed query carries its own sort:.
+  if (state.sort && !/(^|\s)sort:/.test(joined)) {
+    return (joined + " sort:" + state.sort).trim();
+  }
+  return joined;
 }
 
 async function refreshCatalogue() {
   const q = currentQuery();
   state.entries = await call("find_entries", { query: q });
+  const ov = await call("overview");
+  state.volumes = ov.volumes;
   $("#result-count").textContent = `${state.entries.length} volume(s)`;
   renderEntries();
 }
+$("#sort-select").addEventListener("change", (ev) => {
+  state.sort = ev.target.value;
+  localStorage.setItem("repostacks-sort", state.sort);
+  refreshCatalogue();
+});
 
 function groupEntries(entries) {
   const g = state.view.group_by;
@@ -106,7 +125,14 @@ function renderEntries() {
   const host = $("#entries");
   const entries = state.entries;
   if (!entries.length) {
-    host.innerHTML = `<div class="empty">No volumes match. Add some with “+ Add volumes”.</div>`;
+    // Two different empties: an empty library gets a call to action, a
+    // filtered-to-nothing catalogue gets an explanation.
+    if (state.volumes === 0) {
+      host.innerHTML = `<div class="empty"><p>Your library is empty.</p><button id="empty-add" class="primary">+ Add your first volumes</button></div>`;
+      $("#empty-add").addEventListener("click", openAddModal);
+    } else {
+      host.innerHTML = `<div class="empty">No volumes match. Loosen the filters or the search — or add more with “+ Add volumes”.</div>`;
+    }
     return;
   }
   const layout = state.view.layout;
@@ -200,6 +226,7 @@ async function refreshFacets() {
   };
   fill($("#facet-languages"), f.languages, "lang");
   fill($("#facet-topics"), f.topics, "topic");
+  fill($("#facet-licenses"), f.licenses, "license");
   $$("#facet-panel input[type=checkbox]").forEach((cb) =>
     cb.addEventListener("change", composeFacetQuery));
 }
@@ -340,7 +367,21 @@ async function openDetail(fullName) {
     await call("check_all");
     openDetail(e.full_name);
   });
-  $("#detail-remove").addEventListener("click", async () => {
+  $("#detail-remove").addEventListener("click", async (ev) => {
+    // Removing a volume is destructive, so the button arms first:
+    // one click asks, the second confirms. No dialog to dismiss.
+    const btn = ev.currentTarget;
+    if (btn.dataset.armed !== "1") {
+      btn.dataset.armed = "1";
+      btn.textContent = "Remove — click again to confirm";
+      setTimeout(() => {
+        if (btn.isConnected) {
+          btn.dataset.armed = "";
+          btn.textContent = "Remove volume";
+        }
+      }, 3500);
+      return;
+    }
     await call("remove_repo", { repo: e.full_name });
     toast("Volume removed.");
     showScreen("catalogue");
@@ -351,7 +392,7 @@ async function openDetail(fullName) {
       `<div class="release-row"><span class="tag">${esc(n.tag)}</span><span class="muted">${esc(n.updated.slice(0, 10))}</span>${i === 0 ? '<span class="badge installed">latest</span>' : ""}<span>${esc(n.title !== n.tag ? n.title : "")}</span></div>`).join("") || '<span class="muted">No releases in the feed.</span>';
     const res = await call("release_assets", { repo: e.full_name, tag: e.latest_tag });
     $("#detail-assets").innerHTML = res.assets.map((a) =>
-      `<div class="asset-row"><span>${esc(a.name)}</span><span class="muted">${(a.size / 1048576).toFixed(1)} MB</span>${a.name === res.pick ? '<span class="badge installed">auto-pick</span>' : ""}${a.digest ? '<span class="muted">sha256 ✓</span>' : ""}</div>`).join("") + `<div class="muted">Listing cost: ${res.quota} API call.</div>`;
+      `<div class="asset-row"><span>${esc(a.name)}</span><span class="muted">${(a.size / 1048576).toFixed(1)} MB</span>${a.name === res.pick ? '<span class="badge installed">auto-pick</span>' : ""}${a.digest ? '<span class="muted">sha256 ✓</span>' : ""}</div>`).join("") + `<div class="muted">Listing cost: ${res.quota} API call.${res.reason ? " Auto-pick: " + esc(res.reason) + "." : ""}</div>`;
   }
 }
 
@@ -426,13 +467,14 @@ async function refreshQueue() {
     <div class="queue-row">
       <span class="tag">#${j.id}</span>
       <span><strong>${esc(j.repo)}</strong> ${esc(j.tag)} · ${esc(j.asset_name)}</span>
-      <span class="bar"><div style="width:${j.percent.toFixed(0)}%"></div></span>
+      <span class="bar" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${j.percent.toFixed(0)}"><div style="width:${j.percent.toFixed(0)}%"></div></span>
       <span class="muted">${j.percent.toFixed(0)}% · ${(j.bytes_done / 1048576).toFixed(1)}/${(j.bytes_total / 1048576).toFixed(1)} MB</span>
       <span class="badge">${esc(j.status)}</span>
       ${j.error ? `<span class="muted">${esc(j.error)}</span>` : ""}
-      ${j.status === "downloading" || j.status === "queued" ? `<button data-act="pause" data-id="${j.id}">⏸</button>` : ""}
-      ${j.status === "paused" ? `<button data-act="resume" data-id="${j.id}">▶</button>` : ""}
-      ${["queued", "paused", "downloading"].includes(j.status) ? `<button data-act="cancel" data-id="${j.id}">✕</button>` : ""}
+      ${j.status === "downloading" || j.status === "queued" ? `<button data-act="pause" data-id="${j.id}" title="Pause" aria-label="Pause job ${j.id}">⏸</button>` : ""}
+      ${j.status === "paused" ? `<button data-act="resume" data-id="${j.id}" title="Resume" aria-label="Resume job ${j.id}">▶</button>` : ""}
+      ${j.status === "failed" ? `<button data-act="retry" data-id="${j.id}" title="Retry" aria-label="Retry job ${j.id}">↻</button>` : ""}
+      ${["queued", "paused", "downloading"].includes(j.status) ? `<button data-act="cancel" data-id="${j.id}" title="Cancel" aria-label="Cancel job ${j.id}">✕</button>` : ""}
     </div>`).join("");
   host.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", async () => {
     await call("queue_" + b.dataset.act, { id: Number(b.dataset.id) });
@@ -505,9 +547,37 @@ if (listen) {
 }
 
 // ---------- Add modal ----------
-$("#add-btn").addEventListener("click", () => { $("#add-modal").classList.remove("hidden"); $("#add-report").innerHTML = ""; });
-$("#add-close").addEventListener("click", () => $("#add-modal").classList.add("hidden"));
-$("#add-cancel").addEventListener("click", () => $("#add-modal").classList.add("hidden"));
+let lastFocus = null;
+function openAddModal() {
+  lastFocus = document.activeElement;
+  $("#add-modal").classList.remove("hidden");
+  $("#add-report").innerHTML = "";
+  $("#add-single").focus();
+}
+function closeAddModal() {
+  $("#add-modal").classList.add("hidden");
+  if (lastFocus && lastFocus.isConnected) lastFocus.focus();
+}
+$("#add-btn").addEventListener("click", openAddModal);
+$("#add-close").addEventListener("click", closeAddModal);
+$("#add-cancel").addEventListener("click", closeAddModal);
+
+// ---------- Keyboard ----------
+// Ctrl+K jumps to the search box from anywhere; "/" does the same when
+// not already typing; Esc closes the Add modal.
+document.addEventListener("keydown", (ev) => {
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "k") {
+    ev.preventDefault();
+    $("#global-search").focus();
+    $("#global-search").select();
+  } else if (ev.key === "/" && !typing) {
+    ev.preventDefault();
+    $("#global-search").focus();
+  } else if (ev.key === "Escape" && !$("#add-modal").classList.contains("hidden")) {
+    closeAddModal();
+  }
+});
 $("#add-go").addEventListener("click", async () => {
   const single = $("#add-single").value.trim();
   const bulk = $("#add-bulk").value;
@@ -534,6 +604,7 @@ $("#add-go").addEventListener("click", async () => {
   } catch { /* defaults stay */ }
   document.documentElement.dataset.theme = state.view.theme;
   document.documentElement.dataset.density = state.view.density;
+  $("#sort-select").value = state.sort;
   $("#view-layout").value = state.view.layout;
   $("#view-theme").value = state.view.theme;
   $("#view-density").value = state.view.density;

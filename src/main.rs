@@ -6,15 +6,18 @@
 
 use repostacks_core::atom::parse_releases_atom;
 use repostacks_core::cache_policy::CachePolicy;
-use repostacks_core::catalog::Catalog;
-use repostacks_core::download::{enqueue_download, run_pending};
+use repostacks_core::catalog::{Catalog, RepoEntry};
+use repostacks_core::download::{enqueue_download, plan_download, run_pending};
 use repostacks_core::glob_match::select_assets;
 use repostacks_core::http::{CurlDownloader, CurlFetcher};
+use repostacks_core::json::Json;
 use repostacks_core::net::fetch_release_assets;
-use repostacks_core::net::{auth_for_token, check_releases, refresh_metadata, RefreshOutcome};
+use repostacks_core::net::{
+    auth_for_token, check_entries_parallel, check_releases, refresh_metadata, RefreshOutcome,
+};
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
-use repostacks_core::view::{render, Column, Density, GroupBy, Layout, Settings, Theme};
+use repostacks_core::view::{render, status_of, Column, Density, GroupBy, Layout, Settings, Theme};
 use repostacks_core::RepoRef;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -54,6 +57,31 @@ fn run_find(catalog: &Catalog, settings: &Settings, query_text: &str) -> Result<
     Ok(())
 }
 
+/// An entry as JSON for `--json` output: the stored fields plus the
+/// computed status and shelf membership the text views show.
+fn entry_json(e: &RepoEntry, cat: &Catalog) -> Json {
+    let mut obj = e.to_json();
+    if let Json::Obj(pairs) = &mut obj {
+        pairs.push(("status".into(), Json::Str(status_of(e).to_string())));
+        pairs.push((
+            "shelves".into(),
+            Json::Arr(
+                cat.shelves
+                    .iter()
+                    .filter(|(_, members)| members.contains(&e.repo.full_name()))
+                    .map(|(name, _)| Json::Str(name.clone()))
+                    .collect(),
+            ),
+        ));
+    }
+    obj
+}
+
+fn print_entries_json(entries: &[&RepoEntry], cat: &Catalog) {
+    let arr = Json::Arr(entries.iter().map(|e| entry_json(e, cat)).collect());
+    println!("{}", arr.to_string_pretty());
+}
+
 fn data_path() -> PathBuf {
     match std::env::var_os("REPOSTACKS_DATA") {
         Some(p) => PathBuf::from(p),
@@ -73,6 +101,11 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    // `--json` anywhere in the line switches the data commands (list,
+    // find, updates, facets, queue list) to machine-readable output.
+    let json_mode = args.iter().any(|a| a == "--json");
+    let filtered: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
+    let args = &filtered;
     let cmd = args.first().map(String::as_str).unwrap_or("help");
     let path = data_path();
     match cmd {
@@ -158,6 +191,11 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "list" => {
             let cat = Catalog::load(&path)?;
+            if json_mode {
+                let refs: Vec<&RepoEntry> = cat.entries.iter().collect();
+                print_entries_json(&refs, &cat);
+                return Ok(());
+            }
             if cat.entries.is_empty() {
                 println!("Your catalogue is empty. Add a volume: repostacks add owner/repo");
                 return Ok(());
@@ -220,6 +258,12 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             let cat = Catalog::load(&path)?;
             let settings = Settings::load(&settings_path())?;
+            if json_mode {
+                let q = Query::parse(&args[1..].join(" "));
+                let hits = search_execute(&cat, &q);
+                print_entries_json(&hits, &cat);
+                return Ok(());
+            }
             run_find(&cat, &settings, &args[1..].join(" "))
         }
         "search" => {
@@ -379,12 +423,43 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "facets" => {
             let cat = Catalog::load(&path)?;
+            if json_mode {
+                let group = |pairs: Vec<(String, usize)>| {
+                    Json::Arr(
+                        pairs
+                            .into_iter()
+                            .map(|(name, count)| {
+                                Json::Obj(vec![
+                                    ("name".into(), Json::Str(name)),
+                                    ("count".into(), Json::Num(count as f64)),
+                                ])
+                            })
+                            .collect(),
+                    )
+                };
+                let obj = Json::Obj(vec![
+                    ("languages".into(), group(cat.language_facets())),
+                    ("topics".into(), group(cat.topic_facets())),
+                    ("licenses".into(), group(cat.license_facets())),
+                    ("owners".into(), group(cat.owner_facets())),
+                ]);
+                println!("{}", obj.to_string_pretty());
+                return Ok(());
+            }
             println!("Languages:");
             for (name, n) in cat.language_facets() {
                 println!("  {name} ({n})");
             }
             println!("Topics:");
             for (name, n) in cat.topic_facets() {
+                println!("  {name} ({n})");
+            }
+            println!("Licenses:");
+            for (name, n) in cat.license_facets() {
+                println!("  {name} ({n})");
+            }
+            println!("Owners:");
+            for (name, n) in cat.owner_facets() {
                 println!("  {name} ({n})");
             }
             Ok(())
@@ -461,25 +536,32 @@ fn run(args: &[String]) -> Result<(), String> {
                 println!("Your catalogue is empty.");
                 return Ok(());
             }
+            let settings = Settings::load(&settings_path())?;
             let fetcher = CurlFetcher::default();
             let now = now_unix();
+            // Checks run in parallel (bounded by the concurrency setting);
+            // results merge back into the catalogue in catalogue order.
+            let results =
+                check_entries_parallel(&fetcher, &cat.entries, now, settings.concurrency as usize);
             let mut failures = 0;
-            let repos: Vec<RepoRef> = cat.entries.iter().map(|e| e.repo.clone()).collect();
-            for repo in repos {
-                let entry = cat.get_mut(&repo).expect("listed");
-                match check_releases(&fetcher, entry, now) {
+            for r in &results {
+                if let Some(entry) = cat.get_mut(&r.repo) {
+                    entry.latest_tag = r.entry.latest_tag.clone();
+                    entry.last_release_check = r.entry.last_release_check;
+                }
+                match &r.outcome {
                     Ok(out) => {
                         if out.changed {
-                            println!("{repo}: new release {}", out.latest_tag);
+                            println!("{}: new release {}", r.repo, out.latest_tag);
                         } else if !out.latest_tag.is_empty() {
-                            println!("{repo}: {} (no change)", out.latest_tag);
+                            println!("{}: {} (no change)", r.repo, out.latest_tag);
                         } else {
-                            println!("{repo}: no releases");
+                            println!("{}: no releases", r.repo);
                         }
                     }
                     Err(msg) => {
                         failures += 1;
-                        println!("{repo}: {msg}");
+                        println!("{}: {msg}", r.repo);
                     }
                 }
             }
@@ -574,6 +656,15 @@ fn run(args: &[String]) -> Result<(), String> {
                         "  [sha256 published]"
                     }
                 );
+            }
+            match plan_download(
+                entry,
+                &tag,
+                &assets,
+                std::path::Path::new(&Settings::load(&settings_path())?.download_dir),
+            ) {
+                Ok(plan) => println!("Auto-pick: {} — {}", plan.asset_name, plan.reason),
+                Err(msg) => println!("Auto-pick: none ({msg})"),
             }
             println!("API quota spent: {spent}.");
             Ok(())
@@ -757,6 +848,35 @@ fn run(args: &[String]) -> Result<(), String> {
             let mut queue = Queue::load(&qpath)?;
             match args.get(1).map(String::as_str) {
                 None | Some("list") => {
+                    if json_mode {
+                        let arr = Json::Arr(
+                            queue
+                                .jobs
+                                .iter()
+                                .map(|j| {
+                                    Json::Obj(vec![
+                                        ("id".into(), Json::Num(j.id as f64)),
+                                        ("repo".into(), Json::Str(j.repo.full_name())),
+                                        ("tag".into(), Json::Str(j.tag.clone())),
+                                        ("asset_name".into(), Json::Str(j.asset_name.clone())),
+                                        (
+                                            "status".into(),
+                                            Json::Str(j.status.label().to_string()),
+                                        ),
+                                        ("bytes_done".into(), Json::Num(j.bytes_done as f64)),
+                                        ("bytes_total".into(), Json::Num(j.bytes_total as f64)),
+                                        (
+                                            "percent".into(),
+                                            Json::Num(j.progress_percent()),
+                                        ),
+                                        ("error".into(), Json::Str(j.error.clone())),
+                                    ])
+                                })
+                                .collect(),
+                        );
+                        println!("{}", arr.to_string_pretty());
+                        return Ok(());
+                    }
                     if queue.jobs.is_empty() {
                         println!("The acquisitions queue is empty.");
                     }
@@ -831,8 +951,41 @@ fn run(args: &[String]) -> Result<(), String> {
                     println!("Cleared {n} finished job(s).");
                     Ok(())
                 }
+                Some("retry") => {
+                    // retry <id> retries one failed job; retry all retries
+                    // every failed job. A kept .part file makes it resume.
+                    match args.get(2).map(String::as_str) {
+                        Some("all") => {
+                            let ids: Vec<u64> = queue
+                                .jobs
+                                .iter()
+                                .filter(|j| j.status == JobStatus::Failed)
+                                .map(|j| j.id)
+                                .collect();
+                            let n = ids.iter().filter(|id| queue.retry(**id)).count();
+                            queue.save(&qpath).map_err(|e| format!("save queue: {e}"))?;
+                            println!("Requeued {n} failed job(s). Run `queue run` to start them.");
+                            Ok(())
+                        }
+                        Some(id_text) => {
+                            let id: u64 = id_text
+                                .parse()
+                                .map_err(|_| "job id must be a number (or 'all')".to_string())?;
+                            if queue.retry(id) {
+                                queue
+                                    .save(&qpath)
+                                    .map_err(|e| format!("save queue: {e}"))?;
+                                println!("Job {id}: requeued. Run `queue run` to start it.");
+                                Ok(())
+                            } else {
+                                Err(format!("job {id} is not failed — only failed jobs retry"))
+                            }
+                        }
+                        None => Err("usage: repostacks queue retry <id|all>".into()),
+                    }
+                }
                 Some(other) => Err(format!(
-                    "unknown queue action '{other}' (list, run, pause, resume, cancel, clear)"
+                    "unknown queue action '{other}' (list, run, pause, resume, cancel, retry, clear)"
                 )),
             }
         }
@@ -850,6 +1003,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 Some("download-dir") => {
                     settings.download_dir =
                         need(args, 2, "config download-dir <path>")?.to_string();
+                    settings.validate()?;
                     settings
                         .save(&spath)
                         .map_err(|e| format!("save settings: {e}"))?;
@@ -860,10 +1014,8 @@ fn run(args: &[String]) -> Result<(), String> {
                     let n: u32 = need(args, 2, "config concurrency <n>")?
                         .parse()
                         .map_err(|_| "concurrency must be a number".to_string())?;
-                    if n == 0 {
-                        return Err("concurrency must be at least 1".into());
-                    }
                     settings.concurrency = n;
+                    settings.validate()?;
                     settings
                         .save(&spath)
                         .map_err(|e| format!("save settings: {e}"))?;
@@ -877,11 +1029,9 @@ fn run(args: &[String]) -> Result<(), String> {
                     let meta: u64 = need(args, 3, "config poll <atom-secs> <metadata-secs>")?
                         .parse()
                         .map_err(|_| "poll seconds must be a number".to_string())?;
-                    if atom < 60 || meta < 60 {
-                        return Err("poll intervals must be at least 60 seconds".into());
-                    }
                     settings.atom_poll_secs = atom;
                     settings.metadata_poll_secs = meta;
+                    settings.validate()?;
                     settings
                         .save(&spath)
                         .map_err(|e| format!("save settings: {e}"))?;
@@ -896,6 +1046,10 @@ fn run(args: &[String]) -> Result<(), String> {
         "updates" => {
             let cat = Catalog::load(&path)?;
             let ups = cat.updates_available();
+            if json_mode {
+                print_entries_json(&ups, &cat);
+                return Ok(());
+            }
             if ups.is_empty() {
                 println!("Everything installed is up to date.");
             }
@@ -903,6 +1057,61 @@ fn run(args: &[String]) -> Result<(), String> {
                 println!("{}: {} -> {}", e.repo, e.installed_tag, e.latest_tag);
             }
             Ok(())
+        }
+        "doctor" => {
+            // Plain-language health check: state files readable, data
+            // folder writable, curl present. Exit code fails if any check
+            // fails, so scripts can gate on it too.
+            let mut bad = 0usize;
+            let mut report = |ok: bool, label: String| {
+                println!("{} {label}", if ok { "OK   " } else { "FAIL " });
+                if !ok {
+                    bad += 1;
+                }
+            };
+            match Catalog::load(&path) {
+                Ok(c) => report(
+                    true,
+                    format!("catalogue loads ({} volume(s))", c.entries.len()),
+                ),
+                Err(e) => report(false, format!("catalogue: {e}")),
+            }
+            match Queue::load(&queue_path()) {
+                Ok(q) => report(true, format!("queue loads ({} job(s))", q.jobs.len())),
+                Err(e) => report(false, format!("queue: {e}")),
+            }
+            match Settings::load(&settings_path()) {
+                Ok(_) => report(true, "settings load".into()),
+                Err(e) => report(false, format!("settings: {e}")),
+            }
+            let dir = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let probe = dir.join(".repostacks-doctor-probe");
+            let writable = std::fs::create_dir_all(&dir)
+                .and_then(|_| std::fs::write(&probe, b"ok"))
+                .and_then(|_| std::fs::remove_file(&probe))
+                .is_ok();
+            report(
+                writable,
+                format!("data folder {} is writable", dir.display()),
+            );
+            let curl_ok = std::process::Command::new("curl")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            report(
+                curl_ok,
+                "curl is available (network checks and downloads use it)".into(),
+            );
+            if bad > 0 {
+                Err(format!("{bad} check(s) failed"))
+            } else {
+                println!("All checks passed.");
+                Ok(())
+            }
         }
         other => Err(format!("unknown command '{other}' — run `repostacks help`")),
     }
@@ -927,7 +1136,7 @@ fn print_help() {
          shelf list <name>         Show a shelf\n  \
          search <text>             Search name, description, language, topics\n  \
          facets                    Language and topic counts for the filter panel\n  \
-         find <query>              Rich search: lang: topic: license: owner: shelf:NAME stars:>1000 has:update is:installed sort:-stars limit:10\n  \
+         find <query>              Rich search: lang: topic: license: owner: shelf:NAME tag:v1 stars:>1000 has:update is:installed sort:-stars limit:10\n  \
          search save|list|run|delete  Saved searches\n  \
          view [layout|theme|density|group-by|columns|facets|reset]  Presentation settings\n  \
          feed-url <owner/repo>     Print the releases Atom feed URL (quota-free checks)\n  \
@@ -942,9 +1151,11 @@ fn print_help() {
          download <repo> [tag]     Download a release now (queue + engine)\n  \
          update <repo>             Check (free) and download if newer\n  \
          update-all                Check everything and download what's newer\n  \
-         queue [list|run|pause|resume|cancel|clear]  The acquisitions queue\n  \
+         queue [list|run|pause|resume|cancel|retry|clear]  The acquisitions queue\n  \
          config [download-dir|concurrency|poll]  Librarian settings\n  \
          updates                   Installed volumes with a newer release\n  \
+         doctor                    Health check: state files, data folder, curl\n  \
+         --json                    With list/find/updates/facets/queue list: JSON output\n  \
          version                   Print the version\n"
     );
 }

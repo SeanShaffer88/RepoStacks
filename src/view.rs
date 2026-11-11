@@ -434,23 +434,42 @@ impl Settings {
         }
         Ok(s)
     }
-    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+    /// Check settings a user is about to save (as opposed to settings
+    /// being loaded, which stay tolerant of out-of-range values). Errors
+    /// are plain-language and name the field and the allowed range.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=16).contains(&self.concurrency) {
+            return Err(format!(
+                "download concurrency must be between 1 and 16 (got {})",
+                self.concurrency
+            ));
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, self.to_json().to_string_pretty())?;
-        std::fs::rename(&tmp, path)
+        if !(60..=604_800).contains(&self.atom_poll_secs) {
+            return Err(format!(
+                "release-check interval must be between 1 minute and 7 days (got {}s)",
+                self.atom_poll_secs
+            ));
+        }
+        if !(60..=604_800).contains(&self.metadata_poll_secs) {
+            return Err(format!(
+                "metadata-refresh interval must be between 1 minute and 7 days (got {}s)",
+                self.metadata_poll_secs
+            ));
+        }
+        if self.download_dir.trim().is_empty() {
+            return Err("the downloads folder may not be empty".into());
+        }
+        Ok(())
+    }
+
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        crate::persist::save_atomic(path, &self.to_json().to_string_pretty())
     }
     pub fn load(path: &std::path::Path) -> Result<Settings, String> {
-        if !path.exists() {
-            return Ok(Settings::default());
-        }
-        let text = std::fs::read_to_string(path).map_err(|e| format!("read settings: {e}"))?;
-        let v = crate::json::parse(&text).map_err(|e| format!("parse settings: {e}"))?;
-        Settings::from_json(&v)
+        crate::persist::load_recovering(path, |text| {
+            let v = crate::json::parse(text).map_err(|e| format!("parse settings: {e}"))?;
+            Settings::from_json(&v)
+        })
     }
 }
 
@@ -595,6 +614,22 @@ mod tests {
         e.stars = 10;
         e.latest_tag = "v1".into();
         c
+    }
+
+    #[test]
+    fn settings_validate_bounds() {
+        assert!(Settings::default().validate().is_ok());
+        let mut s = Settings::default();
+        s.concurrency = 0;
+        assert!(s.validate().is_err());
+        s.concurrency = 17;
+        assert!(s.validate().is_err());
+        s.concurrency = 3;
+        s.atom_poll_secs = 59;
+        assert!(s.validate().is_err());
+        s.atom_poll_secs = 21_600;
+        s.download_dir = "  ".into();
+        assert!(s.validate().is_err());
     }
 
     #[test]

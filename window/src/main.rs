@@ -10,8 +10,9 @@ use repostacks_core::cache_policy::CachePolicy;
 use repostacks_core::catalog::Catalog;
 use repostacks_core::download::{enqueue_download, plan_download, run_pending};
 use repostacks_core::http::{CurlDownloader, CurlFetcher, Fetcher};
+use repostacks_core::catalog::RepoEntry;
 use repostacks_core::net::{
-    auth_for_token, check_releases, fetch_release_assets, refresh_metadata, RefreshOutcome,
+    auth_for_token, check_entries_parallel, fetch_release_assets, refresh_metadata, RefreshOutcome,
 };
 use repostacks_core::queue::{JobStatus, Queue};
 use repostacks_core::search::{execute as search_execute, Query};
@@ -98,6 +99,20 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Copy the fields a metadata refresh owns from a refreshed clone back
+/// into the stored entry — the stored entry's other fields (shelves are
+/// separate; rules, standing order, installed tag) may have changed
+/// while the network work ran without the state lock held.
+fn apply_refreshed(stored: &mut RepoEntry, refreshed: &RepoEntry) {
+    stored.description = refreshed.description.clone();
+    stored.stars = refreshed.stars;
+    stored.language = refreshed.language.clone();
+    stored.license = refreshed.license.clone();
+    stored.topics = refreshed.topics.clone();
+    stored.etag = refreshed.etag.clone();
+    stored.last_metadata_fetch = refreshed.last_metadata_fetch;
 }
 
 fn log(inner: &mut Inner, text: String) {
@@ -235,6 +250,8 @@ fn facets(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "languages": map(inner.catalog.language_facets()),
         "topics": map(inner.catalog.topic_facets()),
+        "licenses": map(inner.catalog.license_facets()),
+        "owners": map(inner.catalog.owner_facets()),
     }))
 }
 
@@ -354,35 +371,43 @@ fn set_auto(state: State<'_, AppState>, repo: String, on: bool) -> Result<(), St
 
 #[tauri::command]
 fn check_all(state: State<'_, AppState>) -> Result<Vec<CheckDto>, String> {
-    let mut inner = state.inner.lock().unwrap();
+    // Snapshot, then run the checks in parallel WITHOUT holding the
+    // state lock — the rest of the app stays responsive while the
+    // network works. Results merge back under the lock at the end.
+    let (entries, concurrency) = {
+        let inner = state.inner.lock().unwrap();
+        (
+            inner.catalog.entries.clone(),
+            inner.settings.concurrency as usize,
+        )
+    };
     let fetcher = CurlFetcher::default();
     let now = now_unix();
-    let repos: Vec<RepoRef> = inner
-        .catalog
-        .entries
-        .iter()
-        .map(|e| e.repo.clone())
-        .collect();
+    let results = check_entries_parallel(&fetcher, &entries, now, concurrency);
+    let mut inner = state.inner.lock().unwrap();
     let mut out = Vec::new();
-    for repo in repos {
-        let entry = inner.catalog.get_mut(&repo).expect("listed");
-        match check_releases(&fetcher, entry, now) {
+    for r in &results {
+        if let Some(entry) = inner.catalog.get_mut(&r.repo) {
+            entry.latest_tag = r.entry.latest_tag.clone();
+            entry.last_release_check = r.entry.last_release_check;
+        }
+        match &r.outcome {
             Ok(o) => {
                 if o.changed {
-                    log(&mut inner, format!("{repo}: new release {}", o.latest_tag));
+                    log(&mut inner, format!("{}: new release {}", r.repo, o.latest_tag));
                 }
                 out.push(CheckDto {
-                    repo: repo.full_name(),
-                    latest: o.latest_tag,
+                    repo: r.repo.full_name(),
+                    latest: o.latest_tag.clone(),
                     changed: o.changed,
                     error: String::new(),
                 });
             }
             Err(msg) => out.push(CheckDto {
-                repo: repo.full_name(),
+                repo: r.repo.full_name(),
                 latest: String::new(),
                 changed: false,
-                error: msg,
+                error: msg.clone(),
             }),
         }
     }
@@ -397,32 +422,39 @@ fn check_all(state: State<'_, AppState>) -> Result<Vec<CheckDto>, String> {
 
 #[tauri::command]
 fn refresh_all(state: State<'_, AppState>, force: bool) -> Result<serde_json::Value, String> {
-    let mut inner = state.inner.lock().unwrap();
-    let token = state.token(&inner);
+    // Same snapshot pattern as check_all: the REST calls run on clones
+    // without the state lock, then only the refreshed fields merge back.
+    let (entries, token) = {
+        let inner = state.inner.lock().unwrap();
+        (inner.catalog.entries.clone(), state.token(&inner))
+    };
     let policy = CachePolicy::for_auth(auth_for_token(token.as_deref()));
     let fetcher = CurlFetcher::default();
     let now = now_unix();
-    let repos: Vec<RepoRef> = inner
-        .catalog
-        .entries
-        .iter()
-        .map(|e| e.repo.clone())
-        .collect();
     let (mut updated, mut unchanged, mut skipped, mut spent) = (0, 0, 0, 0u32);
     let mut errors = Vec::new();
-    for repo in repos {
-        let entry = inner.catalog.get_mut(&repo).expect("listed");
-        match refresh_metadata(&fetcher, entry, &policy, token.as_deref(), now, force) {
+    let mut refreshed: Vec<RepoEntry> = Vec::new();
+    for mut entry in entries {
+        let repo = entry.repo.clone();
+        match refresh_metadata(&fetcher, &mut entry, &policy, token.as_deref(), now, force) {
             Ok(RefreshOutcome::Updated { quota_spent }) => {
                 updated += 1;
                 spent += quota_spent;
+                refreshed.push(entry);
             }
             Ok(RefreshOutcome::NotModified { quota_spent }) => {
                 unchanged += 1;
                 spent += quota_spent;
+                refreshed.push(entry);
             }
             Ok(RefreshOutcome::SkippedNotDue) => skipped += 1,
             Err(msg) => errors.push(format!("{repo}: {msg}")),
+        }
+    }
+    let mut inner = state.inner.lock().unwrap();
+    for entry in &refreshed {
+        if let Some(stored) = inner.catalog.get_mut(&entry.repo) {
+            apply_refreshed(stored, entry);
         }
     }
     inner.last_metadata_run = now;
@@ -469,14 +501,15 @@ fn release_assets(
     drop(inner);
     let fetcher = CurlFetcher::default();
     let (assets, spent) = fetch_release_assets(&fetcher, &repo_ref, &tag, token.as_deref())?;
-    let pick = plan_download(&entry, &tag, &assets, std::path::Path::new("."))
-        .map(|p| p.asset_name)
+    let (pick, reason) = plan_download(&entry, &tag, &assets, std::path::Path::new("."))
+        .map(|p| (p.asset_name, p.reason))
         .unwrap_or_default();
     Ok(serde_json::json!({
         "assets": assets.iter().map(|a| serde_json::json!({
             "name": a.name, "size": a.size, "digest": a.digest,
         })).collect::<Vec<_>>(),
         "pick": pick,
+        "reason": reason,
         "quota": spent,
     }))
 }
@@ -604,6 +637,16 @@ fn queue_cancel(state: State<'_, AppState>, id: u64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn queue_retry(state: State<'_, AppState>, id: u64) -> Result<(), String> {
+    let mut inner = state.inner.lock().unwrap();
+    if inner.queue.retry(id) {
+        state.save_queue(&inner)
+    } else {
+        Err(format!("job {id} is not failed — only failed jobs retry"))
+    }
+}
+
+#[tauri::command]
 fn queue_clear(state: State<'_, AppState>) -> Result<usize, String> {
     let mut inner = state.inner.lock().unwrap();
     let n = inner.queue.clear_finished();
@@ -689,18 +732,18 @@ fn get_config(state: State<'_, AppState>) -> Result<ConfigDto, String> {
 #[tauri::command]
 fn set_config(state: State<'_, AppState>, config: ConfigDto) -> Result<(), String> {
     let mut inner = state.inner.lock().unwrap();
-    if !config.download_dir.trim().is_empty() {
-        inner.settings.download_dir = config.download_dir.trim().to_string();
-    }
-    if config.concurrency >= 1 {
-        inner.settings.concurrency = config.concurrency;
-    }
-    if config.atom_poll_secs >= 60 {
-        inner.settings.atom_poll_secs = config.atom_poll_secs;
-    }
-    if config.metadata_poll_secs >= 60 {
-        inner.settings.metadata_poll_secs = config.metadata_poll_secs;
-    }
+    // Validate the whole candidate first: a bad value rejects the save
+    // with the reason, instead of being silently clamped or ignored.
+    let mut candidate = inner.settings.clone();
+    candidate.download_dir = config.download_dir.trim().to_string();
+    candidate.concurrency = config.concurrency;
+    candidate.atom_poll_secs = config.atom_poll_secs;
+    candidate.metadata_poll_secs = config.metadata_poll_secs;
+    candidate.validate()?;
+    inner.settings.download_dir = candidate.download_dir;
+    inner.settings.concurrency = candidate.concurrency;
+    inner.settings.atom_poll_secs = candidate.atom_poll_secs;
+    inner.settings.metadata_poll_secs = candidate.metadata_poll_secs;
     state.save_settings(&inner)
 }
 
@@ -731,81 +774,124 @@ fn get_activity(state: State<'_, AppState>) -> Result<Vec<String>, String> {
 
 // ---------- The Librarian ----------
 
-/// One Librarian pass: Atom checks for everything (free), downloads for
-/// standing orders with a newer release, and a metadata refresh when due.
-/// Returns the activity lines it produced.
+/// One Librarian pass: Atom checks for everything (free, in parallel),
+/// downloads for standing orders with a newer release, and a real
+/// metadata refresh when due (policy-governed, quota reported). Network
+/// work runs on snapshots without the state lock; results merge back
+/// under it. Returns the activity lines the pass produced.
 fn librarian_pass(state: &AppState) -> Vec<String> {
     let before = {
         let inner = state.inner.lock().unwrap();
         inner.activity.len()
     };
-    let mut inner = state.inner.lock().unwrap();
     let now = now_unix();
     let fetcher = CurlFetcher::default();
-    let repos: Vec<RepoRef> = inner
-        .catalog
-        .entries
-        .iter()
-        .map(|e| e.repo.clone())
-        .collect();
+    let (entries, settings_snapshot, token) = {
+        let inner = state.inner.lock().unwrap();
+        (
+            inner.catalog.entries.clone(),
+            inner.settings.clone(),
+            state.token(&inner),
+        )
+    };
+    // Atom checks in parallel; standing orders with a newer tag queue up.
+    let results = check_entries_parallel(
+        &fetcher,
+        &entries,
+        now,
+        settings_snapshot.concurrency as usize,
+    );
     let mut to_download: Vec<(RepoRef, String)> = Vec::new();
-    for repo in &repos {
-        // Read what the pass needs from the entry first; the borrow must be
-        // released before logging (which also borrows `inner`).
-        let mut new_release: Option<String> = None;
-        let mut download: Option<String> = None;
-        {
-            let entry = inner.catalog.get_mut(repo).expect("listed");
-            if let Ok(out) = check_releases(&fetcher, entry, now) {
+    {
+        let mut inner = state.inner.lock().unwrap();
+        for r in &results {
+            if let Some(entry) = inner.catalog.get_mut(&r.repo) {
+                entry.latest_tag = r.entry.latest_tag.clone();
+                entry.last_release_check = r.entry.last_release_check;
+            }
+            if let Ok(out) = &r.outcome {
                 if out.changed {
-                    new_release = Some(out.latest_tag.clone());
+                    log(&mut inner, format!("{}: new release {}", r.repo, out.latest_tag));
                 }
-                if entry.auto_download
+                if r.entry.auto_download
                     && !out.latest_tag.is_empty()
-                    && out.latest_tag != entry.installed_tag
+                    && out.latest_tag != r.entry.installed_tag
                 {
-                    download = Some(out.latest_tag.clone());
+                    to_download.push((r.repo.clone(), out.latest_tag.clone()));
                 }
             }
         }
-        if let Some(tag) = &new_release {
-            log(&mut inner, format!("{repo}: new release {tag}"));
-        }
-        if let Some(tag) = download {
-            to_download.push((repo.clone(), tag));
-        }
+        inner.last_atom_run = now;
+        let _ = state.save_catalog(&inner);
     }
-    inner.last_atom_run = now;
-    let _ = state.save_catalog(&inner);
-    // Standing-order downloads.
-    let token = state.token(&inner);
+    // Standing-order downloads: fetch each release's assets unlocked,
+    // then enqueue under the lock.
     for (repo, tag) in to_download {
-        let entry = match inner.catalog.get(&repo) {
-            Some(e) => e.clone(),
-            None => continue,
-        };
         match fetch_release_assets(&fetcher, &repo, &tag, token.as_deref()) {
             Ok((assets, _)) => {
+                let mut inner = state.inner.lock().unwrap();
+                let entry = match inner.catalog.get(&repo) {
+                    Some(e) => e.clone(),
+                    None => continue,
+                };
                 let root = state.downloads_root(&inner.settings);
                 if enqueue_download(&mut inner.queue, &entry, &tag, &assets, &root).is_ok() {
                     log(&mut inner, format!("Standing order: queued {repo} {tag}"));
                 }
             }
-            Err(msg) => log(&mut inner, format!("{repo}: {msg}")),
+            Err(msg) => {
+                let mut inner = state.inner.lock().unwrap();
+                log(&mut inner, format!("{repo}: {msg}"));
+            }
         }
     }
-    if !inner.queue.jobs.is_empty() {
-        let _ = run_queue_locked(state, &mut inner);
+    {
+        let mut inner = state.inner.lock().unwrap();
+        if !inner.queue.jobs.is_empty() {
+            let _ = run_queue_locked(state, &mut inner);
+        }
     }
-    // Metadata refresh when due.
-    if now.saturating_sub(inner.last_metadata_run) >= inner.settings.metadata_poll_secs {
+    // Metadata refresh when due — the policy decides what is stale and
+    // every call is accounted in the log line.
+    let metadata_due = {
+        let inner = state.inner.lock().unwrap();
+        now.saturating_sub(inner.last_metadata_run) >= inner.settings.metadata_poll_secs
+    };
+    if metadata_due {
+        let policy = CachePolicy::for_auth(auth_for_token(token.as_deref()));
+        let (mut updated, mut spent) = (0usize, 0u32);
+        let mut refreshed: Vec<RepoEntry> = Vec::new();
+        for mut entry in entries {
+            match refresh_metadata(&fetcher, &mut entry, &policy, token.as_deref(), now, false) {
+                Ok(RefreshOutcome::Updated { quota_spent }) => {
+                    updated += 1;
+                    spent += quota_spent;
+                    refreshed.push(entry);
+                }
+                Ok(RefreshOutcome::NotModified { quota_spent }) => {
+                    spent += quota_spent;
+                    refreshed.push(entry);
+                }
+                _ => {}
+            }
+        }
+        let mut inner = state.inner.lock().unwrap();
+        for entry in &refreshed {
+            if let Some(stored) = inner.catalog.get_mut(&entry.repo) {
+                apply_refreshed(stored, entry);
+            }
+        }
         inner.last_metadata_run = now;
         log(
             &mut inner,
-            "Metadata refresh due — run Refresh from the Catalogue if wanted".into(),
+            format!(
+                "Librarian metadata refresh: {updated} updated, {spent} API call(s) of {} this hour",
+                policy.auth.hourly_rest_limit()
+            ),
         );
+        let _ = state.save_catalog(&inner);
     }
-    let _ = state.save_catalog(&inner);
+    let inner = state.inner.lock().unwrap();
     let _ = state.save_queue(&inner);
     inner.activity[before..].to_vec()
 }
@@ -853,16 +939,30 @@ fn main() {
         exe_dir,
     };
     // Load persisted state (paths honour the same env overrides as the CLI).
+    // Loads recover from a backup when a file is corrupt; a load that
+    // still fails is said out loud in the activity log, never swallowed.
     {
         let mut inner = state.inner.lock().unwrap();
-        if let Ok(c) = Catalog::load(&state.catalog_path()) {
-            inner.catalog = c;
+        match Catalog::load(&state.catalog_path()) {
+            Ok(c) => inner.catalog = c,
+            Err(e) => log(
+                &mut inner,
+                format!("Catalogue could not be loaded ({e}) — starting empty; the old file stays on disk."),
+            ),
         }
-        if let Ok(s) = Settings::load(&state.settings_path()) {
-            inner.settings = s;
+        match Settings::load(&state.settings_path()) {
+            Ok(s) => inner.settings = s,
+            Err(e) => log(
+                &mut inner,
+                format!("Settings could not be loaded ({e}) — using defaults."),
+            ),
         }
-        if let Ok(q) = Queue::load(&state.queue_path()) {
-            inner.queue = q;
+        match Queue::load(&state.queue_path()) {
+            Ok(q) => inner.queue = q,
+            Err(e) => log(
+                &mut inner,
+                format!("Queue could not be loaded ({e}) — starting empty."),
+            ),
         }
         log(&mut inner, "The Stacks opened".into());
     }
@@ -895,6 +995,7 @@ fn main() {
             queue_pause,
             queue_resume,
             queue_cancel,
+            queue_retry,
             queue_clear,
             get_view,
             set_view,

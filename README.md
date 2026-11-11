@@ -31,10 +31,12 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.1.0: the core library, command line, live network fetching, download engine,
-and the window are built. Windows runtime behaviour is unverified until it runs
-on a real Windows machine — the first field pass decides what gets polished
-next. Screenshots will be added from a real run.
+v0.2.0: the core library, command line, live network fetching, download engine,
+and the window are built, with corruption-proof state files, parallel release
+checks, retryable downloads, and an explainable auto-pick. Windows runtime
+behaviour is unverified until it runs on a real Windows machine — the first
+field pass decides what gets polished next. Screenshots will be added from a
+real run.
 
 ## Command line
 

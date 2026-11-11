@@ -19,6 +19,15 @@
 | Release asset listing + per-volume rules | yes | yes | — | net/download tests + live run |
 | Queue persistence | yes | yes | — | queue round-trip tests |
 | Standing orders (flag) | yes | yes | — | catalog field + CLI |
-| Token storage (DPAPI) | no | no | — | lands with token setting |
-| Window (Tauri) | no | no | no | dark ledger approved; owner's screen concepts on file |
-| Installer + portable release | no | no | no | first release slice |
+| Token storage (DPAPI) | no | no | yes | window dpapi module; runtime unverified |
+| Window (Tauri) | no | no | yes | window crate; CI build; runtime unverified |
+| Installer + portable release | yes | — | yes | v0.1.0 release, hash-verified 2026-11-10 |
+| Corruption-proof state files (backup + quarantine recovery) | yes | yes | yes | persist tests |
+| Parallel release checks | yes | yes | yes | net parallel tests + live CLI run |
+| Failed-job retry | yes | yes | yes | queue tests |
+| Download URL trust + size verification | yes | yes | yes | download tests |
+| Explainable auto-pick (score + reason) | yes | yes | yes | download tests + live `assets` run |
+| JSON output (`--json`) | yes | yes | — | CLI smoke 2026-11-10 |
+| `doctor` health check | yes | yes | — | CLI smoke 2026-11-10 |
+| Settings validation | yes | yes | yes | view tests |
+| Librarian metadata refresh (quota-governed) | yes | — | yes | window librarian pass |

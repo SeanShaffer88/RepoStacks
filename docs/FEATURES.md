@@ -59,6 +59,22 @@
 - Post-install steps remain out of scope by design (see ARCHITECTURE): the library
   downloads and verifies; it never runs anything it fetched.
 
+## Built (hardening slice, v0.2.0)
+- **Corruption-proof state**: catalogue, queue, and settings keep a backup
+  generation; a damaged file is quarantined and the backup restored.
+- **Parallel release checks** in CLI, window, and Librarian; the window stays
+  responsive during checks and refreshes.
+- **Safer downloads**: only https GitHub hosts are fetched; transferred size is
+  verified against the listing; failed jobs retry (resuming from the partial
+  file); the auto-pick explains its score and prefers the program over its
+  setup program or MSI.
+- **Search**: `tag:` filter, real added-date sorting, owner and license facets.
+- **CLI**: `--json` output for the data commands, a `doctor` health check, and
+  validated `config` values.
+- **Librarian**: the metadata pass refreshes for real when due and logs spend.
+- **Interface**: catalogue sort control, keyboard shortcuts, screen-reader
+  semantics, confirm-before-remove, and an empty-library call to action.
+
 ## Planned
 - API-usage meter fed by the cache policy's accounting on the Librarian screen
   (spend is already reported per refresh; a standing meter is polish).

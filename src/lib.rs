@@ -9,6 +9,7 @@ pub mod glob_match;
 pub mod http;
 pub mod json;
 pub mod net;
+pub mod persist;
 pub mod queue;
 pub mod repo_ref;
 pub mod search;

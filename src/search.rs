@@ -5,9 +5,11 @@
 //! - `owner:NAME`, `lang:NAME` / `language:NAME`, `topic:NAME`,
 //!   `license:NAME`, `shelf:NAME`
 //! - `stars:>1000`, `stars:<500`, `stars:100..5000`, `stars:>=42`
+//! - `tag:TEXT` matches the latest or installed release tag
 //! - `has:release`, `has:installed`, `has:update`, `has:auto` (standing order)
 //! - `is:installed`, `is:missing`, `is:current`, `is:outdated`
-//! - `sort:name|stars|release|checked|added` and `sort:-stars` for descending
+//! - `sort:name|stars|release|checked|added` and `sort:-stars` for
+//!   descending
 //! - `limit:N`
 //! Unknown `key:value` terms fall back to a plain text match, so a typo
 //! narrows results instead of erroring the whole search.
@@ -30,6 +32,7 @@ pub struct Query {
     pub topic: String,
     pub license: String,
     pub shelf: String,
+    pub tag: String,
     pub stars_min: Option<u64>,
     pub stars_max: Option<u64>,
     pub has_release: bool,
@@ -51,6 +54,7 @@ impl Default for Query {
             topic: String::new(),
             license: String::new(),
             shelf: String::new(),
+            tag: String::new(),
             stars_min: None,
             stars_max: None,
             has_release: false,
@@ -84,6 +88,7 @@ impl Query {
                 "topic" => q.topic = value.to_lowercase(),
                 "license" => q.license = value.to_lowercase(),
                 "shelf" => q.shelf = value.to_string(),
+                "tag" => q.tag = value.to_lowercase(),
                 "stars" => parse_stars(value, &mut q),
                 "has" => match value.to_lowercase().as_str() {
                     "release" | "releases" => q.has_release = true,
@@ -195,6 +200,12 @@ pub fn execute<'a>(catalog: &'a Catalog, q: &Query) -> Vec<&'a RepoEntry> {
             if !q.shelf.is_empty() && !shelf_members.contains(&e.repo.full_name()) {
                 return false;
             }
+            if !q.tag.is_empty()
+                && !e.latest_tag.to_lowercase().contains(&q.tag)
+                && !e.installed_tag.to_lowercase().contains(&q.tag)
+            {
+                return false;
+            }
             if let Some(min) = q.stars_min {
                 if e.stars < min {
                     return false;
@@ -228,7 +239,8 @@ pub fn execute<'a>(catalog: &'a Catalog, q: &Query) -> Vec<&'a RepoEntry> {
                     return false;
                 }
             }
-            for term in &q.text_terms {
+            if !q.text_terms.is_empty() {
+                // The haystack is built once per entry, not once per term.
                 let hay = format!(
                     "{} {} {} {} {} {}",
                     e.repo.full_name(),
@@ -239,8 +251,10 @@ pub fn execute<'a>(catalog: &'a Catalog, q: &Query) -> Vec<&'a RepoEntry> {
                     e.latest_tag
                 )
                 .to_lowercase();
-                if !hay.contains(term) {
-                    return false;
+                for term in &q.text_terms {
+                    if !hay.contains(term) {
+                        return false;
+                    }
                 }
             }
             true
@@ -256,11 +270,12 @@ pub fn execute<'a>(catalog: &'a Catalog, q: &Query) -> Vec<&'a RepoEntry> {
                     .cmp(&b.repo.full_name().to_lowercase()),
                 SortKey::Stars => a.stars.cmp(&b.stars),
                 SortKey::ReleaseChecked => a.last_release_check.cmp(&b.last_release_check),
-                SortKey::Added => a
-                    .repo
-                    .full_name()
-                    .to_lowercase()
-                    .cmp(&b.repo.full_name().to_lowercase()),
+                SortKey::Added => a.added_unix.cmp(&b.added_unix).then_with(|| {
+                    a.repo
+                        .full_name()
+                        .to_lowercase()
+                        .cmp(&b.repo.full_name().to_lowercase())
+                }),
             };
             if desc {
                 ord.reverse()
@@ -327,9 +342,35 @@ mod tests {
         assert_eq!(execute(&c, &Query::parse("is:installed")).len(), 1);
         assert_eq!(execute(&c, &Query::parse("is:missing")).len(), 3);
         assert_eq!(execute(&c, &Query::parse("has:auto")).len(), 1);
+        assert_eq!(execute(&c, &Query::parse("tag:v0.3")).len(), 1);
+        assert_eq!(
+            execute(&c, &Query::parse("tag:0.3.12")).len(),
+            1,
+            "installed tag matches too"
+        );
         assert_eq!(execute(&c, &Query::parse("llm")).len(), 1);
         assert_eq!(
             execute(&c, &Query::parse("compiler sort:-stars"))
+                .first()
+                .unwrap()
+                .repo
+                .full_name(),
+            "golang/go"
+        );
+        // sort:added uses the real added stamp, newest first with -added.
+        let mut c2 = cat();
+        for (name, when) in [
+            ("rust-lang/rust", 100),
+            ("golang/go", 300),
+            ("ollama/ollama", 200),
+            ("tauri-apps/tauri", 50),
+        ] {
+            c2.get_mut(&RepoRef::parse(name).unwrap())
+                .unwrap()
+                .added_unix = when;
+        }
+        assert_eq!(
+            execute(&c2, &Query::parse("sort:-added limit:1"))
                 .first()
                 .unwrap()
                 .repo

@@ -16,7 +16,7 @@
     <button data-screen="acquisitions">Acquisitions</button>
     <button data-screen="librarian">Librarian</button>
   </nav>
-  <input id="global-search" type="search" placeholder="Search the catalogue…  try  lang:rust stars:&gt;1000 has:update">
+  <input id="global-search" type="search" aria-label="Search the catalogue" placeholder="Search the catalogue…  try  lang:rust stars:&gt;1000 has:update">
   <button id="add-btn" class="primary">+ Add volumes</button>
 </header>
 
@@ -29,6 +29,8 @@
       <div id="facet-languages" class="facet-list"></div>
       <h4>Topic</h4>
       <div id="facet-topics" class="facet-list"></div>
+      <h4>License</h4>
+      <div id="facet-licenses" class="facet-list"></div>
       <h4>Status</h4>
       <div class="facet-list" id="facet-status">
         <label><input type="checkbox" data-status="is:installed"> Installed</label>
@@ -72,6 +74,18 @@
     <div id="catalogue-main">
       <div class="toolbar">
         <span id="result-count"></span>
+        <label class="sort-row">Sort
+          <select id="sort-select" aria-label="Sort the catalogue">
+            <option value="">Catalogue order</option>
+            <option value="name">Name A–Z</option>
+            <option value="-name">Name Z–A</option>
+            <option value="-stars">Stars, most first</option>
+            <option value="stars">Stars, fewest first</option>
+            <option value="-checked">Recently checked</option>
+            <option value="-added">Recently added</option>
+            <option value="added">Added, oldest first</option>
+          </select>
+        </label>
         <span class="spacer"></span>
         <button id="check-now">Check for releases</button>
         <button id="refresh-meta">Refresh metadata</button>
@@ -151,8 +165,8 @@
 
 <!-- Add volumes modal -->
 <div id="add-modal" class="modal hidden">
-  <div class="modal-card">
-    <div class="modal-head"><h3>Add to the catalogue</h3><button id="add-close">✕</button></div>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="add-title">
+    <div class="modal-head"><h3 id="add-title">Add to the catalogue</h3><button id="add-close" aria-label="Close">✕</button></div>
     <label>One volume
       <input id="add-single" type="text" placeholder="owner/repo or https://github.com/owner/repo"></label>
     <label>…or paste a list (one per line)
@@ -167,7 +181,7 @@
   </div>
 </div>
 
-<div id="toast" class="hidden"></div>
+<div id="toast" class="hidden" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>
 </html>

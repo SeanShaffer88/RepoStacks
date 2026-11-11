@@ -21,13 +21,28 @@ pub struct CheckOutcome {
     pub quota_spent: u32,
 }
 
+/// One transport-level retry: a dropped connection or a curl hiccup is
+/// worth exactly one second attempt. HTTP statuses are answers, not
+/// transport failures, and are never retried here.
+fn get_retry<F: Fetcher>(
+    fetcher: &F,
+    url: &str,
+    etag: Option<&str>,
+    token: Option<&str>,
+) -> Result<crate::http::FetchResponse, String> {
+    match fetcher.get(url, etag, token) {
+        Ok(resp) => Ok(resp),
+        Err(first) => fetcher.get(url, etag, token).map_err(|_| first),
+    }
+}
+
 pub fn check_releases<F: Fetcher>(
     fetcher: &F,
     entry: &mut RepoEntry,
     now_unix: u64,
 ) -> Result<CheckOutcome, String> {
     let url = entry.repo.releases_atom_url();
-    let resp = fetcher.get(&url, None, None)?;
+    let resp = get_retry(fetcher, &url, None, None)?;
     if resp.status == 404 {
         return Err(format!(
             "{} has no releases feed (the repo may publish tags only, or not exist)",
@@ -88,7 +103,7 @@ pub fn refresh_metadata<F: Fetcher>(
     } else {
         Some(entry.etag.as_str())
     };
-    let resp = fetcher.get(&entry.repo.api_repo_url(), etag, token)?;
+    let resp = get_retry(fetcher, &entry.repo.api_repo_url(), etag, token)?;
     let quota_spent = if policy.response_counts_against_quota(resp.status) {
         1
     } else {
@@ -123,6 +138,52 @@ pub fn refresh_metadata<F: Fetcher>(
         )),
         other => Err(format!("metadata for {} answered HTTP {other}", entry.repo)),
     }
+}
+
+/// The result of checking one entry in a parallel pass: the outcome plus
+/// the checked copy of the entry (its `latest_tag` / `last_release_check`
+/// already applied), so the caller can merge it back into the catalogue.
+pub struct ParallelCheck {
+    pub repo: crate::repo_ref::RepoRef,
+    pub outcome: Result<CheckOutcome, String>,
+    pub entry: RepoEntry,
+}
+
+/// Check many entries at once, at most `concurrency` fetches in flight.
+/// Results come back in the input order. Each entry is checked on its own
+/// clone, so no mutable state is shared between worker threads.
+pub fn check_entries_parallel<F: Fetcher + Sync>(
+    fetcher: &F,
+    entries: &[RepoEntry],
+    now_unix: u64,
+    concurrency: usize,
+) -> Vec<ParallelCheck> {
+    let stride = concurrency.max(1);
+    let mut out = Vec::with_capacity(entries.len());
+    for chunk in entries.chunks(stride) {
+        let results: Vec<ParallelCheck> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|e| {
+                    scope.spawn(move || {
+                        let mut entry = e.clone();
+                        let outcome = check_releases(fetcher, &mut entry, now_unix);
+                        ParallelCheck {
+                            repo: entry.repo.clone(),
+                            outcome,
+                            entry,
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("check worker panicked"))
+                .collect()
+        });
+        out.extend(results);
+    }
+    out
 }
 
 pub fn auth_for_token(token: Option<&str>) -> Auth {
@@ -230,6 +291,89 @@ mod tests {
         assert_eq!(assets[0].digest, "sha256:beef");
     }
 
+    struct FlakyFake {
+        attempts: std::sync::Mutex<usize>,
+    }
+    impl Fetcher for FlakyFake {
+        fn get(
+            &self,
+            _url: &str,
+            _etag: Option<&str>,
+            _token: Option<&str>,
+        ) -> Result<FetchResponse, String> {
+            let mut n = self.attempts.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                Err("connection dropped".into())
+            } else {
+                Ok(FetchResponse {
+                    status: 200,
+                    etag: String::new(),
+                    body: FEED.into(),
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn transport_failure_is_retried_once() {
+        let fake = FlakyFake {
+            attempts: std::sync::Mutex::new(0),
+        };
+        let mut e = entry();
+        let out = check_releases(&fake, &mut e, 700).unwrap();
+        assert!(out.changed);
+        assert_eq!(*fake.attempts.lock().unwrap(), 2);
+    }
+
+    struct MapFake {
+        by_url: std::sync::Mutex<std::collections::HashMap<String, FetchResponse>>,
+    }
+    impl Fetcher for MapFake {
+        fn get(
+            &self,
+            url: &str,
+            _etag: Option<&str>,
+            _token: Option<&str>,
+        ) -> Result<FetchResponse, String> {
+            self.by_url
+                .lock()
+                .unwrap()
+                .get(url)
+                .cloned()
+                .ok_or_else(|| format!("no scripted response for {url}"))
+        }
+    }
+
+    #[test]
+    fn parallel_checks_cover_all_entries_in_order() {
+        let mut by_url = std::collections::HashMap::new();
+        let mut entries = Vec::new();
+        for name in ["a/one", "b/two", "c/three"] {
+            let e = RepoEntry::new(RepoRef::parse(name).unwrap());
+            by_url.insert(
+                e.repo.releases_atom_url(),
+                FetchResponse {
+                    status: 200,
+                    etag: String::new(),
+                    body: FEED.into(),
+                },
+            );
+            entries.push(e);
+        }
+        let fake = MapFake {
+            by_url: std::sync::Mutex::new(by_url),
+        };
+        let results = check_entries_parallel(&fake, &entries, 900, 2);
+        assert_eq!(results.len(), 3);
+        for (i, name) in ["a/one", "b/two", "c/three"].iter().enumerate() {
+            assert_eq!(results[i].repo.full_name(), *name);
+            assert!(results[i].outcome.as_ref().unwrap().changed);
+            assert_eq!(results[i].entry.latest_tag, "v2");
+            assert_eq!(results[i].entry.last_release_check, 900);
+        }
+    }
+
     #[test]
     fn anonymous_304_costs_quota_but_token_304_does_not() {
         for (auth, expected) in [(Auth::Anonymous, 1), (Auth::Token, 0)] {
@@ -270,7 +414,7 @@ pub fn fetch_release_assets<F: Fetcher>(
     tag: &str,
     token: Option<&str>,
 ) -> Result<(Vec<ReleaseAsset>, u32), String> {
-    let resp = fetcher.get(&repo.api_release_by_tag_url(tag), None, token)?;
+    let resp = get_retry(fetcher, &repo.api_release_by_tag_url(tag), None, token)?;
     match resp.status {
         200 => {}
         404 => return Err(format!("{repo} has no release tagged {tag}")),

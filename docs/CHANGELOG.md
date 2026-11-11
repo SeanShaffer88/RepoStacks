@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.0 — 2026-11-10
+- Reliability: state files (catalogue, queue, settings) keep a backup generation;
+  a corrupt file is quarantined and the backup restored instead of losing the
+  library. Downloads verify the transferred size against the listing (a partial
+  file stays for resume), and fetches retry once on a dropped connection.
+- Security: download URLs must be https on GitHub hosts, checked when a job is
+  planned and again when it runs.
+- Performance: release checks run in parallel (bounded by the concurrency
+  setting) in the CLI, the window, and the Librarian; the window no longer
+  freezes while checks or metadata refreshes run.
+- Downloads: failed jobs can be retried (CLI `queue retry`, Acquisitions ↻);
+  the auto-pick explains its score and prefers the program over its setup
+  program or MSI package.
+- Search: `tag:` filter; `sort:added` now uses the real date a volume was
+  added (new `added_unix` field, older catalogues read as 0); owner and
+  license facets join language and topic (CLI `facets`, window filter panel).
+- CLI: `--json` output for list/find/updates/facets/queue list; `doctor`
+  health check; `config` validates values before saving.
+- Window: the Librarian's metadata pass now actually refreshes when due and
+  logs its API spend; state-load failures appear in the activity log;
+  settings saves are validated.
+- Interface: catalogue sort control (remembered between launches); keyboard
+  shortcuts (Ctrl+K or / for search, Esc closes the Add dialog, which now
+  takes and returns focus properly); screen-reader semantics (aria-current
+  navigation, live-region toasts, labelled controls, progress bars);
+  removing a volume asks for a confirming second click; an empty library
+  shows an Add call to action; the asset list shows why the auto-pick
+  chose what it chose.
+
 ## 0.1.0 — 2026-11-10
 - Released as `RepoStacks-v0.1.0-x64-Setup.exe` + `RepoStacks-v0.1.0-x64-Portable.zip`
   + `SHA256SUMS.txt`. The command line ships as `repostacks-cli.exe` so it can sit

@@ -187,3 +187,11 @@ td.num, th.num { font-family: var(--mono); text-align: right; }
 }
 #toast.error { border-color: var(--danger); }
 .empty { color: var(--muted); padding: 26px 8px; text-align: center; }
+.empty .primary { margin-top: 10px; }
+.sort-row { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; color: var(--muted); font-size: 13px; }
+/* Keyboard users get a clear focus ring in every theme. */
+:focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; }
+/* Respect the system's reduced-motion setting. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
