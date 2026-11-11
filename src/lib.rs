@@ -14,6 +14,7 @@ pub mod queue;
 pub mod repo_ref;
 pub mod search;
 pub mod sha256;
+pub mod usage;
 pub mod user_import;
 pub mod view;
 
@@ -22,3 +23,4 @@ pub use cache_policy::{Auth, CachePolicy};
 pub use catalog::{Catalog, RepoEntry};
 pub use queue::{DownloadJob, JobStatus, Queue};
 pub use repo_ref::RepoRef;
+pub use usage::{UsageKind, UsageLedger, UsageSnapshot};
