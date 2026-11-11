@@ -1,13 +1,26 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
 jobs:
   test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked
-      - run: cargo build --release --locked
+      - name: Test the core and CLI
+        run: cargo test --locked
+      - name: Build the release binary
+        run: cargo build --release --locked
+
+  window:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the window (production protocol)
+        run: cargo build --release --locked --features custom-protocol --manifest-path window/Cargo.toml
