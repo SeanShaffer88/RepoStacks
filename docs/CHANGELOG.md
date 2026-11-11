@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 — 2026-11-11
+- Asset rules suggest themselves: a volume page with no saved rules now
+  fills the Asset rules box from the release's filename scheme — each
+  program file's name with its version generalized to `*` (so
+  `App-v0.2.0-x64-Portable.zip` becomes `App-*-x64-Portable.zip` and
+  keeps matching future releases), auto-pick first, checksum and
+  signature files excluded. A "Suggest from assets" button refills the
+  box at any time. Nothing is stored until Save rules is clicked. The
+  CLI `assets` command prints the same suggestions, ready to paste into
+  `rules`.
+
 ## 0.4.0 — 2026-11-11
 - Search grows negation and freshness: prefix any term with `-` to
   exclude it (`-lang:c`, `-topic:games`, `-is:installed`), and find

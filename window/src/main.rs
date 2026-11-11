@@ -8,7 +8,9 @@ mod dpapi;
 use repostacks_core::atom::parse_releases_atom;
 use repostacks_core::cache_policy::CachePolicy;
 use repostacks_core::catalog::Catalog;
-use repostacks_core::download::{enqueue_download, plan_download, run_pending};
+use repostacks_core::download::{
+    enqueue_download, plan_download, run_pending, suggest_asset_patterns,
+};
 use repostacks_core::http::{CurlDownloader, CurlFetcher, Fetcher};
 use repostacks_core::catalog::RepoEntry;
 use repostacks_core::net::{
@@ -692,6 +694,7 @@ fn release_assets(
         })).collect::<Vec<_>>(),
         "pick": pick,
         "reason": reason,
+        "suggested": suggest_asset_patterns(&assets, &tag),
         "quota": spent,
     }))
 }

@@ -129,6 +129,98 @@ pub fn plan_download(
     })
 }
 
+/// Suggest asset rules from a release's file names: each program file's
+/// name with its version generalized to `*`, so the rule keeps matching
+/// future releases. Checksum and signature sidecars are skipped — a
+/// rule should name the program. The auto-pick winner's pattern comes
+/// first, because planning uses the first matching rule.
+pub fn suggest_asset_patterns(assets: &[ReleaseAsset], tag: &str) -> Vec<String> {
+    let mut ranked: Vec<&ReleaseAsset> = assets
+        .iter()
+        .filter(|a| !is_sidecar_name(&a.name))
+        .collect();
+    // Stable sort: score order, listing order within equal scores.
+    ranked.sort_by_key(|a| std::cmp::Reverse(windows_score(&a.name)));
+    let mut out: Vec<String> = Vec::new();
+    for a in ranked {
+        let pattern = generalize_asset_name(&a.name, tag);
+        if !out.contains(&pattern) {
+            out.push(pattern);
+        }
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
+fn is_sidecar_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("sha256sum")
+        || n.contains("sha512sum")
+        || n.contains("md5sum")
+        || n.contains("checksums")
+        || [".sha256", ".sha512", ".md5", ".sig", ".asc", ".minisig"]
+            .iter()
+            .any(|s| n.ends_with(s))
+}
+
+/// Replace the tag (with or without its leading `v`) and any remaining
+/// dotted version run with `*`: `App-v1.2.0-x64.zip` → `App-*-x64.zip`.
+/// Plain numbers stay (`x64`, `win32` are part of the scheme).
+fn generalize_asset_name(name: &str, tag: &str) -> String {
+    let mut out = name.to_string();
+    for variant in [tag, tag.strip_prefix('v').unwrap_or(tag)] {
+        if !variant.is_empty() && out.contains(variant) {
+            out = out.replace(variant, "*");
+        }
+    }
+    out = replace_version_runs(&out);
+    while out.contains("**") {
+        out = out.replace("**", "*");
+    }
+    out
+}
+
+fn replace_version_runs(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            // Extend a candidate run of digits and dots.
+            let mut j = i;
+            let mut has_dot = false;
+            while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
+                if chars[j] == '.' {
+                    has_dot = true;
+                }
+                j += 1;
+            }
+            let run = &chars[i..j];
+            let clean = run.last().map(|c| c.is_ascii_digit()).unwrap_or(false);
+            if has_dot && clean && run.iter().filter(|c| **c == '.').count() >= 1 {
+                // Absorb a directly attached leading v (app-v1.2.3).
+                if out.ends_with('v') || out.ends_with('V') {
+                    let prev_ok = {
+                        let b = out.as_bytes();
+                        b.len() < 2 || matches!(b[b.len() - 2], b'-' | b'_' | b'.')
+                    };
+                    if prev_ok {
+                        out.pop();
+                    }
+                }
+                out.push('*');
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// The auto-pick score as labelled parts, so the total can be explained.
 /// A library wants the program itself: setup programs and MSI packages
 /// score down (the file in the library should be the thing, not its
@@ -697,6 +789,69 @@ mod tests {
             "the engine must ask the transport to resume when a .part exists"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn suggested_patterns_generalize_the_version() {
+        let assets = vec![
+            ReleaseAsset {
+                name: "RepoStacks-v0.2.0-x64-Portable.zip".into(),
+                url: "https://github.com/o/r/releases/download/v0.2.0/p.zip".into(),
+                size: 1,
+                digest: String::new(),
+            },
+            ReleaseAsset {
+                name: "RepoStacks-v0.2.0-x64-Setup.exe".into(),
+                url: "https://github.com/o/r/releases/download/v0.2.0/s.exe".into(),
+                size: 1,
+                digest: String::new(),
+            },
+            ReleaseAsset {
+                name: "SHA256SUMS.txt".into(),
+                url: "https://github.com/o/r/releases/download/v0.2.0/SHA".into(),
+                size: 1,
+                digest: String::new(),
+            },
+        ];
+        let got = suggest_asset_patterns(&assets, "v0.2.0");
+        assert_eq!(got[0], "RepoStacks-*-x64-Portable.zip", "auto-pick first");
+        assert!(got.contains(&"RepoStacks-*-x64-Setup.exe".to_string()));
+        assert_eq!(got.len(), 2, "the checksum file is not a rule: {got:?}");
+        // Suggested rules actually match the next version's file names.
+        assert!(crate::glob_match::glob_match(
+            &got[0],
+            "RepoStacks-v9.9.9-x64-Portable.zip"
+        ));
+
+        let one = |name: &str, tag: &str| {
+            suggest_asset_patterns(
+                &[ReleaseAsset {
+                    name: name.into(),
+                    url: "https://github.com/o/r/x".into(),
+                    size: 1,
+                    digest: String::new(),
+                }],
+                tag,
+            )
+        };
+        assert_eq!(
+            one("app-1.2.3-win64.zip", "release-9"),
+            vec!["app-*-win64.zip"]
+        );
+        assert_eq!(
+            one("app-v2.0-linux.tar.gz", "v2.0"),
+            vec!["app-*-linux.tar.gz"]
+        );
+        assert_eq!(
+            one("tool.zip", "v1"),
+            vec!["tool.zip"],
+            "unversioned stays literal"
+        );
+        assert_eq!(
+            one("x64-setup.exe", "v3"),
+            vec!["x64-setup.exe"],
+            "x64 is scheme, not version"
+        );
     }
 
     #[test]

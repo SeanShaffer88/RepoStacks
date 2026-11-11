@@ -31,7 +31,10 @@ your computer — all without needing a GitHub account.
 
 ## Status
 
-v0.4.0: a second enhancement round — search negation and due-for-check
+v0.5.0: asset rules suggest themselves from a release's filename scheme
+(the version becomes `*`, so the rule keeps matching future releases) on
+the volume page and in the CLI. Before that, v0.4.0 was a second
+enhancement round — search negation and due-for-check
 filters, parallel metadata refresh, catalogue export, download-folder
 cleaning, window saved searches and column picker, Open on GitHub, and
 keyboard-openable entries throughout. Before that, v0.3.0 added importing

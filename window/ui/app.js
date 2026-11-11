@@ -386,7 +386,8 @@ async function openDetail(fullName) {
         <h3>Asset rules (auto-download pick)</h3>
         <textarea id="detail-rules" rows="4" placeholder="One glob per line, e.g. *-x86_64-pc-windows-msvc.zip">${esc(e.asset_patterns.join("\n"))}</textarea>
         <div class="row"><button id="detail-rules-save">Save rules</button>
-        <span class="muted">No rules = the Windows-first default pick.</span></div>
+        <button id="detail-rules-suggest">Suggest from assets</button>
+        <span class="muted" id="detail-rules-note">No rules = the Windows-first default pick.</span></div>
       </div>
       <div class="panel">
         <h3>Release history</h3>
@@ -425,6 +426,16 @@ async function openDetail(fullName) {
     const patterns = $("#detail-rules").value.split("\n").map((s) => s.trim()).filter(Boolean);
     await call("set_rules", { repo: e.full_name, patterns });
     toast("Asset rules saved.");
+  });
+  state.detailSuggested = [];
+  $("#detail-rules-suggest").addEventListener("click", () => {
+    if (state.detailSuggested.length) {
+      $("#detail-rules").value = state.detailSuggested.join("\n");
+      $("#detail-rules-note").textContent =
+        "Suggested from these file names — Save rules to keep them. The first matching line is the one that downloads.";
+    } else {
+      toast("Suggestions come from a release's file names — check for a release first.", true);
+    }
   });
   $("#detail-download").addEventListener("click", async () => {
     toast(`Downloading ${e.full_name} ${e.latest_tag}…`);
@@ -471,6 +482,15 @@ async function openDetail(fullName) {
     const res = await call("release_assets", { repo: e.full_name, tag: e.latest_tag });
     $("#detail-assets").innerHTML = res.assets.map((a) =>
       `<div class="asset-row"><span>${esc(a.name)}</span><span class="muted">${(a.size / 1048576).toFixed(1)} MB</span>${a.name === res.pick ? '<span class="badge installed">auto-pick</span>' : ""}${a.digest ? '<span class="muted">sha256 ✓</span>' : ""}</div>`).join("") + `<div class="muted">Listing cost: ${res.quota} API call.${res.reason ? " Auto-pick: " + esc(res.reason) + "." : ""}</div>`;
+    // Auto-fill the rules box from the assets' filename scheme when the
+    // volume has no rules of its own yet — a suggestion, not a save:
+    // nothing is stored until "Save rules" is clicked.
+    state.detailSuggested = res.suggested || [];
+    if (!e.asset_patterns.length && state.detailSuggested.length) {
+      $("#detail-rules").value = state.detailSuggested.join("\n");
+      $("#detail-rules-note").textContent =
+        "Suggested from these file names — Save rules to keep them. The first matching line is the one that downloads.";
+    }
   }
 }
 

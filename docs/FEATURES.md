@@ -59,6 +59,13 @@
 - Post-install steps remain out of scope by design (see ARCHITECTURE): the library
   downloads and verifies; it never runs anything it fetched.
 
+## Built (suggested-rules slice, v0.5.0)
+- **Self-suggesting asset rules**: `suggest_asset_patterns` (core) turns a
+  release's file names into rules — version generalized to `*`, sidecars
+  skipped, auto-pick first. The volume page auto-fills the rules box when
+  a volume has no rules yet (unsaved until Save rules), a Suggest button
+  refills on demand, and CLI `assets` prints the same list.
+
 ## Built (round-2 enhancement slice, v0.4.0)
 - Search negation (`-term` for every filter kind) and freshness filters
   (`is:due`, `is:never`); the query engine takes the clock explicitly.

@@ -9,6 +9,7 @@ use repostacks_core::cache_policy::CachePolicy;
 use repostacks_core::catalog::{Catalog, RepoEntry};
 use repostacks_core::download::{
     clean_downloads, enqueue_download, plan_download, run_pending, scan_downloads,
+    suggest_asset_patterns,
 };
 use repostacks_core::glob_match::select_assets;
 use repostacks_core::http::{hidden_command, CurlDownloader, CurlFetcher};
@@ -818,6 +819,16 @@ fn run(args: &[String]) -> Result<(), String> {
             ) {
                 Ok(plan) => println!("Auto-pick: {} — {}", plan.asset_name, plan.reason),
                 Err(msg) => println!("Auto-pick: none ({msg})"),
+            }
+            let suggested = suggest_asset_patterns(&assets, &tag);
+            if !suggested.is_empty() {
+                println!(
+                    "Suggested rules (repostacks rules {repo} {}):",
+                    suggested.join(" ")
+                );
+                for p in &suggested {
+                    println!("  {p}");
+                }
             }
             println!("API quota spent: {spent}.");
             Ok(())
