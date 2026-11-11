@@ -352,13 +352,10 @@ fn export_catalog(state: State<'_, AppState>) -> Result<String, String> {
     let file = root.join("repostacks-catalogue-export.json");
     std::fs::write(&file, inner.catalog.to_json().to_string_pretty())
         .map_err(|e| format!("write {}: {e}", file.display()))?;
+    let count = inner.catalog.entries.len();
     log(
         &mut inner,
-        format!(
-            "Exported {} volume(s) to {}",
-            inner.catalog.entries.len(),
-            file.display()
-        ),
+        format!("Exported {count} volume(s) to {}", file.display()),
     );
     Ok(file.display().to_string())
 }
