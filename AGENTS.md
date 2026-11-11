@@ -10,10 +10,11 @@ Purpose in one line: A Windows library app for GitHub repositories — catalogue
 - **Release shape:** `RepoStacks-v{VERSION}-x64-Setup.exe` + `RepoStacks-v{VERSION}-x64-Portable.zip` + `SHA256SUMS.txt`. No MSI, no winget, x64 only, binaries unsigned.
 
 Frozen foundation: `src/` single crate — `repostacks_core` library (all operations) + `repostacks` CLI (thin surface). Modules: repo_ref, atom, cache_policy, catalog, glob_match, queue, json.
-Build: `cargo build` · Full gate: `cargo test` (all targets) + a linked Windows binary. Local Windows link route on the dev VM (no MSVC): `RUSTFLAGS="-C linker=rust-lld -L $HOME/llvm-mingw/x86_64-w64-mingw32/lib -C link-arg=$HOME/llvm-mingw/x86_64-w64-mingw32/lib/crt2.o" cargo build --release --target x86_64-pc-windows-gnullvm` — verify the .exe is fresh (size + mtime) and `file` reports PE32+. Test corpus: unit tests in each module, incl. the cache-policy regression guard.
+Build: `cargo build` · Full gate: `cargo test` (all targets) + a linked Windows binary. Local Windows link route on the dev VM (no MSVC): `RUSTFLAGS="-C linker=rust-lld -L $HOME/llvm-mingw/x86_64-w64-mingw32/lib -C link-arg=$HOME/llvm-mingw/x86_64-w64-mingw32/lib/crt2.o -C link-arg=--allow-multiple-definition" cargo build --release --target x86_64-pc-windows-gnullvm` — verify the .exe is fresh (size + mtime) and `file` reports PE32+. Test corpus: unit tests in each module, incl. the cache-policy regression guard.
 Budgets: metadata REST spend = 0 for release checks (Atom only); 1 REST call per actual new release (assets); anonymous metadata refresh >= 24h.
 Coverage floors: 85% core / 70% overall / 100% safety paths (Elite defaults).
 Special rules for this project:
+- **TesselGUI does NOT apply to this project** (owner, 2026-11-10). RepoStacks has its own design language: the **dark ledger** design the owner picked 2026-11-10 (spreadsheet-style catalogue tables on a dark ground; mockups v2 in the project record). The owner's Workbench screenshot informed the spreadsheet direction; the workbench chrome itself was not picked. Do not retrofit TesselGUI tokens or the GitHub Dark scheme here.
 - The blueprint's ETag claim was wrong for anonymous callers — never reintroduce "304s are free without a token" (see docs/ARCHITECTURE.md and cache_policy tests).
 - A pasted personal access token is stored with DPAPI only, never in the catalogue JSON, never logged.
 - Post-download actions are download-only by default; running anything needs a per-repo explicit opt-in.

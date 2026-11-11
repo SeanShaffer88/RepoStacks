@@ -48,5 +48,19 @@ store sits behind the `Catalog` type so the swap touches one module.
 - 2026-11-10 — Name: RepoStacks (owner's pick; zero same-name repos on GitHub).
 - 2026-11-10 — Core-first, zero-dependency foundation; Tauri/SQLite/HTTP
   dependencies are introduced slice by slice, each with owner approval.
+- 2026-11-10 — TesselGUI design standard does not apply to RepoStacks (owner's call). Window design approved the same day: the **dark ledger** — spreadsheet-style tables on a dark ground (mockups v2).
+- 2026-11-10 — HTTP transport is the system `curl` behind a `Fetcher` trait: zero crate
+  dependencies, works on Windows 10 1803+ / Windows 11 out of the box, and every network
+  operation stays testable with a scripted fetcher. A bundled HTTP crate can replace it
+  later without touching the operations.
+- 2026-11-10 — The owner supplied eight window screen concepts as ideas to adapt (grid
+  catalogue with facet sidebar, shelf view, book-page detail, acquisitions, dense table,
+  My Shelf, bulk-import dialog, Librarian dashboard). They shape the window slice; the
+  approved default presentation remains the dark ledger table, with the other layouts
+  one switch away — the same `ViewConfig` the CLI already renders from.
+- 2026-11-10 — Known feed characteristic: a repo that publishes releases for several
+  components (e.g. BurntSushi/ripgrep also releases its `ignore` crate) surfaces the
+  newest component release in its Atom feed. The book-page detail's release history is
+  where a user picks the release they actually track.
 - 2026-11-10 — Download-only by default; post-download execution is a
   per-repo explicit opt-in, never automatic.

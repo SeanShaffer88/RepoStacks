@@ -145,6 +145,14 @@ impl RepoEntry {
     }
 }
 
+/// Outcome of a bulk import — the counts the Add Volumes preview shows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ImportReport {
+    pub added: Vec<String>,
+    pub duplicates: Vec<String>,
+    pub invalid: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Catalog {
     pub entries: Vec<RepoEntry>,
@@ -170,6 +178,31 @@ impl Catalog {
         }
         self.entries.push(RepoEntry::new(repo));
         true
+    }
+
+    /// Bulk import: one repo per line (`owner/repo` or a github.com URL).
+    /// Blank lines and `#` comments are skipped. Returns what was added,
+    /// what was already present, and what did not parse — the preview the
+    /// Add Volumes dialog shows before anything is committed.
+    pub fn import_list(&mut self, text: &str) -> ImportReport {
+        let mut report = ImportReport::default();
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            match RepoRef::parse(line) {
+                Ok(repo) => {
+                    if self.add(repo.clone()) {
+                        report.added.push(repo.full_name());
+                    } else {
+                        report.duplicates.push(repo.full_name());
+                    }
+                }
+                Err(e) => report.invalid.push((line.to_string(), e.0)),
+            }
+        }
+        report
     }
 
     pub fn get(&self, repo: &RepoRef) -> Option<&RepoEntry> {
@@ -435,5 +468,21 @@ mod tests {
         assert_eq!(back.entries[0].repo.full_name(), "rust-lang/rust");
         let bad = crate::json::parse("{\"schema_version\": 99, \"repos\": []}").unwrap();
         assert!(Catalog::from_json(&bad).is_err());
+    }
+
+    #[test]
+    fn bulk_import_reports_added_duplicates_and_invalid() {
+        let mut c = Catalog::default();
+        c.add(RepoRef::parse("sharkdp/bat").unwrap());
+        let text = "# my list\nsharkdp/bat\nBurntSushi/ripgrep\n\nhttps://github.com/casey/just\nnot a repo\n";
+        let report = c.import_list(text);
+        assert_eq!(report.added, vec!["BurntSushi/ripgrep", "casey/just"]);
+        assert_eq!(report.duplicates, vec!["sharkdp/bat"]);
+        // GitHub identity is case-insensitive: a case variant is a duplicate.
+        let report2 = c.import_list("SHARKDP/BAT\n");
+        assert_eq!(report2.duplicates.len(), 1);
+        assert!(report2.added.is_empty());
+        assert_eq!(report.invalid.len(), 1);
+        assert_eq!(c.entries.len(), 3);
     }
 }

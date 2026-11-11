@@ -2,10 +2,43 @@
 
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// A GitHub repository reference. Display case is preserved as typed, but
+/// identity is case-insensitive — GitHub treats `Sharkdp/bat` and
+/// `sharkdp/bat` as the same repository, and so does the catalogue.
+#[derive(Debug, Clone)]
 pub struct RepoRef {
     pub owner: String,
     pub name: String,
+}
+
+impl RepoRef {
+    /// Lowercased identity key used for equality, hashing, and ordering.
+    pub fn key(&self) -> (String, String) {
+        (self.owner.to_lowercase(), self.name.to_lowercase())
+    }
+}
+
+impl PartialEq for RepoRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+impl Eq for RepoRef {}
+
+impl PartialOrd for RepoRef {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for RepoRef {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+impl std::hash::Hash for RepoRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
