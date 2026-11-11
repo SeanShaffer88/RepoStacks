@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0 — 2026-11-11
+
+- A built-in benchmark: the new CLI command `bench` times the core
+  operations — catalogue save and load, the rich search, the facet
+  counts, the Atom feed parser, and the parallel release-check
+  pipeline (with the network replaced by a stub, so it measures the
+  app's own work) — over a synthetic catalogue of 5,000 volumes
+  (`--repos N` changes the size, `--json` gives machine-readable
+  output). The generator is fixed-seed, so runs are comparable over
+  time. The first recorded run and the method behind it are in
+  `docs/PERFORMANCE.md`: on the recording machine a 5,000-volume
+  catalogue (2.7 MB on disk) loads in about 57 ms, searches take
+  single-digit milliseconds, and a release check costs about
+  250 µs of the app's own work per repo.
+
 ## 0.9.0 — 2026-11-11
 
 - A standing API-usage meter: every REST call RepoStacks counts —
