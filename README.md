@@ -67,9 +67,11 @@ line. The core library, command line, live network fetching, download engine,
 and the window are built, with corruption-proof state files, parallel release
 checks, retryable downloads, and an explainable auto-pick. The window has run
 on a real Windows machine (2026-11-11): the catalogue and volume detail
-screens render as designed, and metadata refresh, release checks, and
-release history all work — see Screenshots. Still unverified in the field:
-the installer, token storage, downloads from the window, and the Librarian.
+screens render as designed, and metadata refresh, release checks, release
+history, account import from the window, a full Librarian pass, and the
+API-usage meter all work — see Screenshots. Still unverified in the field:
+the installer, token storage, downloads from the window, the tray, and the
+Librarian's timed schedule.
 
 ## Command line
 
@@ -120,17 +122,28 @@ cargo build --release
 
 ## Screenshots
 
-Real runs on Windows (v0.2.0, 2026-11-11):
+Real runs on Windows (v0.10.0, 2026-11-11; the detail page is from v0.2.0):
 
-The catalogue on first launch — an empty library, the filter panel (language,
-topic, license, status), and the sort control:
+Importing a GitHub account's projects — the preview counts what the filters
+match and what the listing costs before anything is added:
 
-![Catalogue — empty library](docs/images/catalogue.png)
+![Import preview](docs/images/import.png)
+
+The catalogue as a ledger — 85 volumes just imported, with language and
+topic facets counted down the side:
+
+![Catalogue — ledger](docs/images/catalogue.png)
 
 A volume's book page — shelves, the standing-order toggle, per-volume asset
 rules, release history, and the release's downloadable assets:
 
 ![Volume detail](docs/images/detail.png)
+
+The Librarian — schedule and download settings, catalogue backup, the
+API-usage meter counting the app's own calls, and an activity log of a pass
+that found real new releases:
+
+![The Librarian](docs/images/librarian.png)
 
 ## License
 
